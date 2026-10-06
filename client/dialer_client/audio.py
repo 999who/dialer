@@ -95,6 +95,9 @@ class AudioCapture:
         self._thread: threading.Thread | None = None
         self.mic_device: Device | None = None
         self.line_device: Device | None = None
+        # callable -> bool; False mutes the line channel (Zadarma is silent, so whatever the
+        # loopback hears is some other app's sound, not the client)
+        self.line_gate = None
 
     # ---------------------------------------------------------------- devices
     @staticmethod
@@ -195,6 +198,9 @@ class AudioCapture:
                 nxt = time.monotonic()  # fell behind (sleep/hibernate): resync
             left = self._mic.take(TICK_N) * self.mic_gain
             right = self._line.take(TICK_N) * self.line_gain
+            gate = self.line_gate
+            if gate is not None and not gate():
+                right = np.zeros_like(right)
             try:
                 self.on_frame(interleave(left, right), rms(left), rms(right))
             except Exception:

@@ -18,7 +18,8 @@ summary_seconds = 45
 opacity = 0.96
 show_in_taskbar = true   # false = tray icon only
 
-# Call detection (no Zadarma API locally: inferred from audio)
+# Call detection (no Zadarma API locally: inferred from Zadarma's audio streams in Windows)
+call_detect = "zadarma"   # zadarma = by Zadarma's own audio streams; voice = by any sound (old mode)
 call_end_silence_s = 15
 no_line_warning_s = 12
 require_zadarma = true

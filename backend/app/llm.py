@@ -113,6 +113,21 @@ class HintLLM:
             }
         return t.GenerateContentConfig(**kw)
 
+    async def check(self) -> str:
+        """One tiny request at startup: '' if the key and model work, otherwise the error text."""
+        try:
+            resp = await asyncio.wait_for(
+                self.client.aio.models.generate_content(
+                    model=self.model, contents="Odpowiedz jednym słowem: OK",
+                    config=self._config("", json_out=False, max_tokens=256)),
+                timeout=max(20.0, self.settings.gemini_timeout_s))
+            return "" if resp is not None else "empty response"
+        except asyncio.TimeoutError:
+            return "timeout"
+        except Exception as e:  # bad key, unknown model, no network, quota
+            msg = getattr(e, "message", None) or str(e)  # google.genai APIError: "API key not valid…"
+            return f"{getattr(e, 'code', type(e).__name__)} {msg}"[:300]
+
     async def decide(self, rag_context: str, last_hint: str, transcript_history: str) -> dict:
         system, user = self.prompt.render(rag_context, last_hint, transcript_history)
         try:

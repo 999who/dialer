@@ -35,6 +35,7 @@ class Config:
     summary_seconds: float = 45.0
     opacity: float = 0.96
     show_in_taskbar: bool = True
+    call_detect: str = "zadarma"   # zadarma = by Zadarma's own audio streams (Windows); voice = by any sound
     call_end_silence_s: float = 15.0
     no_line_warning_s: float = 12.0
     require_zadarma: bool = True
