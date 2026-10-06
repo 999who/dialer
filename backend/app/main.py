@@ -11,7 +11,7 @@ client -> server
   text   {"type":"text","speaker":"client|operator","text":"…"}   # test injection, bypasses STT
 
 server -> client
-  {"type":"ready","model":"…","stt":"parakeet|none"}
+  {"type":"ready","model":"…","stt":"parakeet|none","llm_error":""}   # llm_error non-empty: no hints
   {"type":"call_started","call_id":"…"}
   {"type":"transcript","speaker":"client","text":"…","t":12.3}
   {"type":"hint","id":"…","category":"objection","topic":"cena","hint":"…","quote":"…","match":0.92,
@@ -50,13 +50,24 @@ async def lifespan(app: FastAPI):
     state["kb"] = KnowledgeBase(s.database_url)
     await state["kb"].start()
     state["embedder"] = await loop.run_in_executor(None, Embedder, s.embed_model) if s.database_url else None
+    state["llm"], state["llm_error"] = None, ""
     if s.gemini_api_key:
         from .llm import HintLLM
-        state["llm"] = HintLLM(s)
+        llm = HintLLM(s)
+        err = await llm.check()
+        if err:
+            # keep it: a network hiccup at startup shouldn't disable hints, but say it loudly
+            log.error("GEMINI CHECK FAILED (model=%s): %s. Check GEMINI_API_KEY / GEMINI_MODEL in .env",
+                      s.gemini_model, err)
+            state["llm_error"] = err
+        else:
+            log.info("gemini ok: model=%s", s.gemini_model)
+        state["llm"] = llm
     else:
         log.warning("GEMINI_API_KEY empty: hints disabled, transcripts only")
-        state["llm"] = None
-    log.info("ready: stt=%s model=%s rag=%s", s.stt_engine, s.gemini_model, bool(s.database_url))
+        state["llm_error"] = "GEMINI_API_KEY empty"
+    log.info("ready: stt=%s model=%s llm=%s rag=%s", s.stt_engine, s.gemini_model,
+             "ok" if not state["llm_error"] else "ERROR", bool(s.database_url))
     yield
     if state["kb"].pool:
         await state["kb"].pool.close()
@@ -69,7 +80,7 @@ app = FastAPI(title="EMANAGER Dialer backend", lifespan=lifespan)
 async def health():
     s = get_settings()
     return {"ok": True, "stt": s.stt_engine, "model": s.gemini_model, "rag": bool(state.get("embedder")),
-            "llm": bool(state.get("llm"))}
+            "llm": bool(state.get("llm")), "llm_error": state.get("llm_error", "")}
 
 
 @app.websocket("/ws")
@@ -115,7 +126,8 @@ async def ws_endpoint(ws: WebSocket):
             return
         await session.on_utterance(Utterance(seg.speaker, text, seg.t_start, seg.t_end, seg.ended_at))
 
-    await send({"type": "ready", "model": s.gemini_model, "stt": s.stt_engine})
+    await send({"type": "ready", "model": s.gemini_model, "stt": s.stt_engine,
+                "llm_error": state.get("llm_error", "")})
     log.info("operator %s connected", hello.get("agent_id"))
     try:
         while True:

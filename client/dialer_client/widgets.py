@@ -279,6 +279,9 @@ ERRORS = {
     "auth": ("SERWER ODRZUCIŁ TOKEN",
              "Token nie zgadza się z AUTH_TOKEN na serwerze. Wpisz poprawny token w ustawieniach połączenia.",
              "Ustawienia połączenia"),
+    "no_llm": ("PODPOWIEDZI NIEDOSTĘPNE",
+               "Serwer nie może połączyć się z Gemini. Transkrypcja działa, ale podpowiedzi nie będą się "
+               "pojawiać. Sprawdź GEMINI_API_KEY i GEMINI_MODEL w backend\\.env.", "Połącz ponownie"),
     "no_line": ("NIE SŁYCHAĆ LINII",
                 "Dźwięk rozmówcy nie dociera. Sprawdź, czy Zadarma wysyła dźwięk na wybrane urządzenie.",
                 "Wybierz urządzenie"),

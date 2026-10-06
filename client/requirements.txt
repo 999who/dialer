@@ -3,3 +3,4 @@ numpy>=1.26
 soxr>=0.3.7
 psutil>=5.9
 PyAudioWPatch>=0.2.12; platform_system == "Windows"
+pycaw>=20240316; platform_system == "Windows"     # Zadarma audio sessions (call start/end)

@@ -1,4 +1,5 @@
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -92,3 +93,63 @@ def test_broken_config_falls_back_to_defaults(tmp_path):
     p = tmp_path / "config.toml"
     p.write_text('server_url = "ws://x\n', encoding="utf-8")
     assert load_config(p).server_url == "ws://localhost:8000/ws"
+
+
+def _z(mic=False, out=False, peak=0.0):
+    from dialer_client.zadarma_audio import ZadarmaAudio
+
+    return ZadarmaAudio(available=True, found=True, mic_active=mic, out_active=out, out_peak=peak)
+
+
+def test_system_sound_does_not_start_a_call_when_zadarma_is_idle():
+    d = CallDetector()
+    for i in range(100):  # YouTube on the loopback, Zadarma has no streams
+        assert d.update(0.0, 0.2, i * 0.1, zadarma=_z()) is None
+    for i in range(100, 200):  # ringtone: Zadarma plays, microphone closed
+        assert d.update(0.0, 0.2, i * 0.1, zadarma=_z(out=True, peak=0.5)) is None
+    assert not d.in_call
+
+
+def test_zadarma_streams_start_and_end_the_call():
+    d = CallDetector()
+    now, events = 0.0, []
+    for _ in range(10):  # answered: mic open, client says "Halo"
+        now += 0.1
+        events.append(d.update(0.0, 0.2, now, zadarma=_z(mic=True, out=True, peak=0.3)))
+    assert events.count("start") == 1 and d.in_call
+    for _ in range(50):  # 5 s pause in the conversation, streams still open
+        now += 0.1
+        assert d.update(0.0, 0.0, now, zadarma=_z(mic=True, out=True)) is None
+    events = []
+    for _ in range(30):  # hang up: Zadarma closes its streams
+        now += 0.1
+        events.append(d.update(0.0, 0.0, now, zadarma=_z()))
+    assert events.count("end") == 1 and not d.in_call
+
+
+def test_line_gate_mutes_other_apps_only_while_zadarma_is_silent():
+    from dialer_client.zadarma_audio import ZadarmaAudio, ZadarmaAudioWatcher
+
+    w = ZadarmaAudioWatcher(lambda st: None)
+    assert w.gate_open()  # nothing known yet
+    w.state = ZadarmaAudio(available=True, found=False)
+    assert w.gate_open()  # Zadarma not seen: never mute
+    w.state = _z(mic=True, out=True)
+    assert not w.gate_open()  # Zadarma silent -> loopback is someone else's sound
+    w._last_sound = time.monotonic()
+    assert w.gate_open()
+
+
+def test_read_zadarma_audio_on_windows():
+    """Exercises the real COM calls; CI runs this on windows-latest."""
+    import pytest
+
+    if sys.platform != "win32":
+        pytest.skip("Windows audio session API")
+    import comtypes
+
+    from dialer_client.zadarma_audio import read_zadarma_audio
+
+    comtypes.CoInitialize()
+    st = read_zadarma_audio()
+    assert st.available and not st.mic_active  # no Zadarma on the CI runner

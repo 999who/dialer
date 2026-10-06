@@ -18,6 +18,7 @@ from .connect_dialog import ConnectDialog
 from .detect import CallDetector, ZadarmaWatcher
 from .net import BackendLink
 from .overlay import CORNERS, Overlay
+from .zadarma_audio import ZadarmaAudioWatcher
 
 log = logging.getLogger("app")
 
@@ -26,6 +27,7 @@ class Bridge(QObject):
     """Thread -> Qt main thread."""
     frame = pyqtSignal(bytes, float, float)
     zadarma = pyqtSignal(object)
+    zadarma_audio = pyqtSignal(object)
 
 
 class DialerApp(QObject):
@@ -41,10 +43,12 @@ class DialerApp(QObject):
         self.preroll: deque[bytes] = deque(maxlen=30)  # 3 s, so the first words aren't lost
         self.transcript: list[tuple[float, str, str]] = []
         self.zadarma_ok: bool | None = None
+        self.zadarma_audio = None  # latest ZadarmaAudio snapshot
         self.manual_call = False
 
         self.bridge.frame.connect(self._on_frame)
         self.bridge.zadarma.connect(self._on_zadarma)
+        self.bridge.zadarma_audio.connect(self._on_zadarma_audio)
         self.link.message.connect(self._on_message)
         self.link.online_changed.connect(self._on_online)
         self.link.retry_in.connect(lambda s: self.overlay.show_error("server", f"ponowna próba za {s} s"))
@@ -63,6 +67,9 @@ class DialerApp(QObject):
 
         self.audio = (audio_factory or self._make_audio)()
         self.watcher = ZadarmaWatcher(self.bridge.zadarma.emit)
+        self.zwatch = ZadarmaAudioWatcher(self.bridge.zadarma_audio.emit)
+        if cfg.call_detect == "zadarma":
+            self.audio.line_gate = self.zwatch.gate_open
         self._setup_tray()
 
     # ---------------------------------------------------------------- startup
@@ -78,6 +85,8 @@ class DialerApp(QObject):
         self.overlay.show()
         self.link.connect_now()
         self.watcher.start()
+        if self.cfg.call_detect == "zadarma":
+            self.zwatch.start()
         try:
             self.audio.start()
             self.overlay.clear_error("no_audio")
@@ -99,7 +108,8 @@ class DialerApp(QObject):
     # ---------------------------------------------------------------- audio / call
     def _on_frame(self, frame: bytes, mic: float, line: float) -> None:
         self.overlay.set_levels(mic, line)
-        ev = self.detector.update(mic, line)
+        z = self.zadarma_audio if (self.cfg.call_detect == "zadarma" and not self.manual_call) else None
+        ev = self.detector.update(mic, line, zadarma=z)
         if ev == "start" and self.cfg.require_zadarma and self.zadarma_ok is False:
             self.detector.force(False)  # sound without Zadarma (YouTube, Teams…) is not a call
             ev = None
@@ -137,6 +147,13 @@ class DialerApp(QObject):
         if self.detector.in_call:
             self.overlay.set_call(True, time.monotonic() - self.detector.started_at)
 
+    def _on_zadarma_audio(self, st) -> None:
+        prev = self.zadarma_audio
+        self.zadarma_audio = st
+        if prev is None or (prev.available, prev.mic_active, prev.out_active) != (st.available, st.mic_active,
+                                                                                   st.out_active):
+            log.info("zadarma audio: available=%s mic=%s out=%s", st.available, st.mic_active, st.out_active)
+
     def _on_zadarma(self, running) -> None:
         self.zadarma_ok = running
         if running is False and self.cfg.require_zadarma:
@@ -170,7 +187,12 @@ class DialerApp(QObject):
 
     def _on_message(self, m: dict) -> None:
         t = m.get("type")
-        if t == "transcript":
+        if t == "ready":
+            if m.get("llm_error"):
+                self.overlay.show_error("no_llm", str(m["llm_error"])[:40])
+            else:
+                self.overlay.clear_error("no_llm")
+        elif t == "transcript":
             self.transcript.append((m.get("t", 0), m["speaker"], m["text"]))
             self.overlay.add_transcript(m.get("t", 0), m["speaker"], m["text"])
         elif t == "hint":
@@ -185,7 +207,7 @@ class DialerApp(QObject):
 
     # ---------------------------------------------------------------- actions
     def _on_error_action(self, kind: str) -> None:
-        if kind == "server":
+        if kind in ("server", "no_llm"):
             self.link.connect_now()
         elif kind == "auth":
             self.open_connection_settings()
