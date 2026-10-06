@@ -3,9 +3,9 @@ name: Client exe
 on:
   push:
     branches: [main]
-    paths: ["client/**", ".github/workflows/client-exe.yml"]
+    paths: ["client/**", "backend/app/**", "backend/models/**", "prompts/**", ".github/workflows/client-exe.yml"]
   pull_request:
-    paths: ["client/**", ".github/workflows/client-exe.yml"]
+    paths: ["client/**", "backend/app/**", "backend/models/**", "prompts/**", ".github/workflows/client-exe.yml"]
   workflow_dispatch:
 
 permissions:
@@ -34,6 +34,14 @@ jobs:
       - name: Build EmanagerDialer.exe
         working-directory: client
         run: pyinstaller -y EmanagerDialer.spec
+
+      - name: Self-test (built-in backend inside the exe)
+        working-directory: client
+        shell: pwsh
+        run: |
+          $p = Start-Process dist\EmanagerDialer.exe -ArgumentList "--selftest" -PassThru -Wait
+          Get-Content "$env:LOCALAPPDATA\EMANAGER\EMANAGER Dialer\dialer.log" -ErrorAction SilentlyContinue | Select-Object -Last 40
+          if ($p.ExitCode -ne 0) { throw "selftest failed with code $($p.ExitCode)" }
 
       - name: Smoke test (demo mode starts and keeps running)
         working-directory: client

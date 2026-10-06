@@ -61,38 +61,27 @@ def test_detector_ignores_operator_only_audio():
     assert not d.in_call
 
 
-def test_normalize_server_url_accepts_what_people_type():
-    from dialer_client.config import normalize_server_url as n
-
-    assert n(' http://0.0.0.0:8000') == "ws://localhost:8000/ws"
-    assert n("localhost") == "ws://localhost:8000/ws"
-    assert n("192.168.1.50:9000/") == "ws://192.168.1.50:9000/ws"
-    assert n("ws://localhost:8000/ws") == "ws://localhost:8000/ws"
-    assert n("https://dialer.example.com") == "wss://dialer.example.com/ws"
-    assert n("") == "ws://localhost:8000/ws"
-
-
 def test_save_values_keeps_comments_and_other_keys(tmp_path):
     from dialer_client.config import load_config, needs_setup, save_values
 
     p = tmp_path / "config.toml"
-    assert needs_setup(load_config(p), p)
-    p.write_text('# comment\nserver_url = "ws://YOUR-SERVER:8000/ws"   # note\nmic_gain = 1.5\n', encoding="utf-8")
-    assert needs_setup(load_config(p), p)
-    save_values({"server_url": "ws://localhost:8000/ws", "token": 'a"b'}, p)
+    assert needs_setup(load_config(p))
+    p.write_text('# comment\nserver_url = "ws://YOUR-SERVER:8000/ws"   # old\nmic_gain = 1.5\n', encoding="utf-8")
+    assert needs_setup(load_config(p))
+    save_values({"gemini_api_key": 'a"b', "gemini_model": "gemini-3.5-flash-lite"}, p)
     text = p.read_text(encoding="utf-8")
     assert text.startswith("# comment\n") and "mic_gain = 1.5" in text
     cfg = load_config(p)
-    assert cfg.server_url == "ws://localhost:8000/ws" and cfg.token == 'a"b' and cfg.mic_gain == 1.5
-    assert not needs_setup(cfg, p)
+    assert cfg.gemini_api_key == 'a"b' and cfg.gemini_model == "gemini-3.5-flash-lite" and cfg.mic_gain == 1.5
+    assert not needs_setup(cfg)
 
 
 def test_broken_config_falls_back_to_defaults(tmp_path):
     from dialer_client.config import load_config
 
     p = tmp_path / "config.toml"
-    p.write_text('server_url = "ws://x\n', encoding="utf-8")
-    assert load_config(p).server_url == "ws://localhost:8000/ws"
+    p.write_text('gemini_model = "x\n', encoding="utf-8")
+    assert load_config(p).gemini_model == "gemini-3.8-flash"
 
 
 def _z(mic=False, out=False, peak=0.0):
@@ -153,3 +142,11 @@ def test_read_zadarma_audio_on_windows():
     comtypes.CoInitialize()
     st = read_zadarma_audio()
     assert st.available and not st.mic_active  # no Zadarma on the CI runner
+
+
+def test_gemini_key_is_cleaned(tmp_path):
+    from dialer_client.config import load_config, save_values
+
+    p = tmp_path / "config.toml"
+    save_values({"gemini_api_key": ' "AIzaXYZ" '}, p)
+    assert load_config(p).gemini_api_key == "AIzaXYZ"
