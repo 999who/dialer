@@ -2,12 +2,12 @@
 
 Оверлей поверх всех окон Windows показывает оператору Zadarma короткие подсказки
 во время звонка. Стек: PyQt6-клиент, стерео-аудио по WebSocket, NVIDIA Parakeet
-на бэкенде, поиск по базе знаний в Supabase pgvector и Gemini с мастер-промптом
+на процессоре бэкенда (без видеокарты), поиск по базе знаний в Supabase pgvector и Gemini с мастер-промптом
 EMANAGER.PRO.
 
 ```
-[ПК оператора]                               [Бэкенд (GPU)]                          [Облако]
- микрофон ─► L ┐                               VAD по каналам (Silero)
+[ПК оператора]                               [Бэкенд (CPU)]                          [Облако]
+ микрофон ─► L ┐                               VAD по каналам (Silero ONNX)
                ├─ 16 кГц s16le stereo ─WS─►    Parakeet TDT 0.6B v3 (pl) ─► [Klient]/[Operator]
  loopback ─► R ┘   (100 мс кадры)              RAG: e5-small ─► Supabase pgvector ─► Gemini (JSON)
  PyQt6 оверлей ◄────────── JSON-подсказка ◄────────────────────────────────────┘
@@ -25,7 +25,9 @@ EMANAGER.PRO.
 | `client/dialer_client/net.py` | WebSocket с автопереподключением и буфером на 60 с (подсказки «догоняют» разговор) |
 | `client/dialer_client/detect.py` | Определение начала и конца звонка по звуку, проверка процесса Zadarma |
 | `backend/app/main.py` | FastAPI, WebSocket `/ws`, описание протокола в начале файла |
-| `backend/app/stt.py` | VAD-нарезка по каналам + Parakeet с батчингом запросов всех операторов на одной GPU |
+| `backend/app/stt.py` | VAD-нарезка по каналам (Silero ONNX) + Parakeet через onnx-asr на CPU (int8), батчинг запросов всех операторов |
+| `backend/app/langfilter.py` | Отбрасывает английские фразы, которые Parakeet v3 иногда выдаёт на тихом звуке |
+| `backend/models/silero_vad.onnx` | Модель Silero VAD (MIT), взята из recorder_fork |
 | `backend/app/session.py` | RAG-контроллер: фильтр реплик, поиск, вызов Gemini, дедупликация, обогащение JSON для UI |
 | `backend/app/llm.py` | Gemini: мастер-промпт делится на статичную `system_instruction` и динамический блок |
 | `backend/app/rag_store.py` | Эмбеддинги e5 (`query:`/`passage:`), поиск через asyncpg, логирование звонков |
@@ -40,17 +42,20 @@ EMANAGER.PRO.
 1. SQL Editor → вставить `backend/sql/001_schema.sql` → Run.
 2. Строку подключения взять в Project Settings → Database (Session pooler, порт 5432) и положить в `DATABASE_URL`.
 
-### 2. Бэкенд (Linux + NVIDIA GPU)
+### 2. Бэкенд (любой ПК или сервер, Windows или Linux, видеокарта не нужна)
 ```bash
 cd backend
-python -m venv .venv && . .venv/bin/activate
-pip install torch --index-url https://download.pytorch.org/whl/cu124   # под вашу CUDA
-pip install -r requirements.txt "nemo_toolkit[asr]>=2.4"
-cp .env.example .env        # GEMINI_API_KEY, DATABASE_URL, AUTH_TOKEN
+python -m venv .venv && . .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install torch --index-url https://download.pytorch.org/whl/cpu   # CPU-версия для e5, без CUDA
+pip install -r requirements.txt
+cp .env.example .env        # GEMINI_API_KEY, DATABASE_URL, AUTH_TOKEN, PARAKEET_THREADS
 python -m tools.ingest_kb   # загрузить kb/ в Supabase
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
-Проверка без софтфона и без GPU: `STT_ENGINE=none` в `.env`, затем
+При первом запуске onnx-asr скачает модель Parakeet int8 (~670 МБ) с Hugging Face. Для офлайн-сервера
+положите файлы модели в папку и укажите её в `PARAKEET_MODEL_PATH`.
+
+Проверка без софтфона и без распознавания: `STT_ENGINE=none` в `.env`, затем
 `python -m tools.simulate_call --script tools/demo_dialogue.txt --token <AUTH_TOKEN>`.
 Для проверки Parakeet: `--wav call.wav` (стерео 16 кГц, L = оператор, R = клиент).
 
@@ -71,10 +76,13 @@ python run.py
 - **Модель Gemini.** Gemini 1.5 Flash отключена. По умолчанию стоит `gemini-3.8-flash`
   (стабильная, сентябрь 2026) с `thinking_level=low`. Если задержка выше 2,5 с, переключите
   `GEMINI_MODEL=gemini-3.5-flash-lite`. Обе меняются в `.env` без правки кода.
-- **Parakeet и польский язык.** `parakeet-tdt-0.6b-v2` понимает только английский, поэтому взята
-  `nvidia/parakeet-tdt-0.6b-v3` (25 европейских языков, включая польский). Модель не потоковая:
-  реплика распознаётся целиком, как только VAD видит 450 мс тишины. Итоговый бюджет примерно такой:
-  0,45 с паузы + 0,1–0,2 с STT + ~0,03 с RAG + 0,8–1,5 с Gemini.
+- **Parakeet на процессоре, как в recorder_fork.** Parakeet TDT 0.6B v3 (25 европейских языков,
+  включая польский) запускается через `onnx-asr` на onnxruntime, только CPU, квантизация int8.
+  Silero VAD тоже работает из ONNX-файла, поэтому бэкенду не нужны ни видеокарта, ни NeMo.
+  Перед распознаванием звук проходит фильтр 80 Гц и нормализацию, а после — фильтр английских
+  фраз (v3 нельзя жёстко переключить на польский). Модель не потоковая: реплика распознаётся
+  целиком, как только VAD видит 450 мс тишины. Время распознавания растёт с длиной реплики;
+  `PARAKEET_THREADS` (2–4) задаёт, сколько ядер отдать модели.
 - **Роли без диаризации.** Спикер определяется каналом: L всегда оператор, R всегда клиент.
 - **Захват.** WASAPI loopback ничего не отдаёт, пока в динамиках тишина, а у двух звуковых карт
   разные часы. Микшер работает по 100-мс тактам от системных часов, дополняет пустой канал нулями и
@@ -98,11 +106,12 @@ python run.py
 
 ## Что проверено, а что нет
 
-Проверено в облачной Linux-среде: 19 юнит-тестов (бэкенд и клиент), сквозной прогон
+Проверено в облачной Linux-среде: 25 юнит-тестов, включая настоящий Silero VAD на onnxruntime (бэкенд и клиент), сквозной прогон
 клиент ↔ WebSocket ↔ бэкенд с подставной LLM, схема SQL и загрузка/поиск/логирование на Postgres 16 +
 pgvector, сборка запроса к Gemini (google-genai 2.28), отрисовка всех экранов оверлея (картинка выше).
 
-Не проверено, нужен ваш Windows-ПК и GPU-сервер: реальный захват WASAPI (PyAudioWPatch есть только
-под Windows), распознавание Parakeet, загрузка модели e5 (Hugging Face закрыт в моей среде),
+Не проверено, нужен ваш Windows-ПК: реальный захват WASAPI (PyAudioWPatch есть только
+под Windows), распознавание Parakeet и его скорость на вашем процессоре, загрузка моделей Parakeet и e5
+(Hugging Face закрыт в моей среде),
 живые вызовы Gemini и фактическая задержка, расход памяти клиентом на Windows (на Linux демо-режим
 занимает ~53 МБ).
