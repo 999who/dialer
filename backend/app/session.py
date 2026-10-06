@@ -125,8 +125,11 @@ class CallSession:
             while u is not None:
                 try:
                     await self._evaluate(u)
-                except Exception:
+                except Exception as e:
                     log.exception("hint evaluation failed")
+                    # tell the operator instead of silently showing nothing
+                    reason = f"{getattr(e, 'code', type(e).__name__)} {getattr(e, 'message', None) or e}"
+                    await self.send({"type": "error", "code": "llm", "message": reason[:300]})
                 u, self._pending = self._pending, None
         finally:
             self._busy = False

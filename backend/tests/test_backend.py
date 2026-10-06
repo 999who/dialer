@@ -162,6 +162,24 @@ def test_session_coalesces_and_dedupes():
     run(go())
 
 
+def test_session_reports_gemini_errors_to_the_operator():
+    class BrokenLLM(FakeLLM):
+        async def decide(self, rag_context, last_hint, history):
+            raise RuntimeError("API key not valid")
+
+    async def go():
+        sent = []
+
+        async def send(m): sent.append(m)
+        s = CallSession(settings=S, llm=BrokenLLM({}), kb=FakeKB([]), embedder=FakeEmbedder(), send=send)
+        await s.on_utterance(Utterance("client", "Jaka będzie cena za stronę?", 1, 3))
+        await asyncio.sleep(0.05)
+        err = next(m for m in sent if m["type"] == "error")
+        assert err["code"] == "llm" and "API key not valid" in err["message"]
+        assert not s._busy  # next utterance still gets evaluated
+    run(go())
+
+
 def test_websocket_text_mode(monkeypatch):
     monkeypatch.setenv("STT_ENGINE", "none")
     monkeypatch.setenv("DATABASE_URL", "")

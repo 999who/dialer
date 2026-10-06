@@ -18,7 +18,7 @@ server -> client
    "variants":["…"],"sources":[{"title":"…","ref":"…"}],"latency_ms":1800}
   {"type":"latency","ms":1650}
   {"type":"call_summary","duration_s":468,"summary":"…","hints":5,"used":3,"objections":2}
-  {"type":"error","code":"auth|bad_format","message":"…"}
+  {"type":"error","code":"auth|bad_format|llm","message":"…"}   # llm: Gemini call failed, no hint
 """
 from __future__ import annotations
 
