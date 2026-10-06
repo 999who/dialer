@@ -19,8 +19,9 @@ class Settings(BaseSettings):
     database_url: str = ""
 
     stt_engine: str = "parakeet"  # parakeet | none
-    parakeet_model: str = "nvidia/parakeet-tdt-0.6b-v3"
-    stt_device: str = "cuda"
+    parakeet_threads: int = 3          # onnxruntime intra-op threads (CPU)
+    parakeet_model_path: str = ""      # local folder with the int8 ONNX files; empty = download from Hugging Face
+    stt_polish_only: bool = True       # drop clips Parakeet returns in English
     stt_batch_window_ms: int = 15
     stt_max_batch: int = 8
 

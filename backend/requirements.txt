@@ -3,17 +3,18 @@ fastapi>=0.115
 uvicorn[standard]>=0.30
 pydantic-settings>=2.4
 numpy>=1.26
+scipy>=1.10
 
 # --- LLM (Gemini) ---
 google-genai>=1.40
 
+# --- STT + VAD on CPU: Parakeet TDT 0.6B v3 via onnx-asr, Silero VAD (models/silero_vad.onnx) ---
+onnxruntime>=1.18.1,!=1.24.1,!=1.25.*,!=1.26.0
+onnx-asr[cpu,hub]>=0.12.0
+
 # --- RAG: embeddings + Supabase Postgres (pgvector) ---
+# sentence-transformers pulls torch; install the CPU wheel first to skip CUDA:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
 sentence-transformers>=3.0     # intfloat/multilingual-e5-small
 asyncpg>=0.29
 pgvector>=0.3
-
-# --- VAD ---
-silero-vad>=5.1
-
-# --- STT: NVIDIA Parakeet (needs CUDA GPU; install torch for your CUDA first) ---
-# pip install "nemo_toolkit[asr]>=2.4"

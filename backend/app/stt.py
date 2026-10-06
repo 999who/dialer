@@ -1,22 +1,29 @@
-"""Speech-to-text: per-channel VAD segmentation + NVIDIA Parakeet.
+"""Speech-to-text: per-channel VAD segmentation + NVIDIA Parakeet on CPU.
 
 The client sends interleaved stereo PCM16 @16 kHz: L = operator mic, R = client
 (WASAPI loopback). Each channel gets its own segmenter, so speaker roles come
 from the channel and no diarization model is needed.
 
+No GPU and no torch: same approach as 999who/recorder_fork (feat/parakeet-engine).
+- Parakeet TDT 0.6B v3 (multilingual, incl. Polish) runs through onnx-asr on
+  onnxruntime, CPU, int8. Cost grows with clip length, so short utterances are cheap.
+- Silero VAD runs from its ONNX file (backend/models/silero_vad.onnx) on onnxruntime.
+
 Parakeet TDT is an offline (non-streaming) model, so we transcribe whole
-utterances as soon as VAD sees end-of-speech. With ~450 ms of trailing silence
-plus ~50-150 ms GPU inference the transcript is ready ~0.6 s after the speaker
-stops, which leaves room for RAG + Gemini inside the 1.5-2.5 s target.
+utterances as soon as VAD sees end-of-speech (~450 ms of trailing silence).
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
+
+from .langfilter import is_foreign_language
 
 log = logging.getLogger("stt")
 
@@ -49,30 +56,55 @@ class _EnergyVAD:
         return speech
 
 
+MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
+_silero_session = None
+_silero_lock = threading.Lock()
+
+
+def _silero():
+    """One shared onnxruntime session; every detector keeps its own recurrent state."""
+    global _silero_session
+    with _silero_lock:
+        if _silero_session is None:
+            import onnxruntime as ort
+
+            opts = ort.SessionOptions()
+            opts.intra_op_num_threads = 1
+            opts.inter_op_num_threads = 1
+            _silero_session = ort.InferenceSession(str(MODELS_DIR / "silero_vad.onnx"), sess_options=opts,
+                                                   providers=["CPUExecutionProvider"])
+        return _silero_session
+
+
 class _SileroVAD:
-    frame = 512  # silero v5 needs exactly 512 samples @16 kHz
+    """Silero VAD v5 via onnxruntime: 512-sample windows @16 kHz with 64 samples of context."""
 
-    def __init__(self, model) -> None:
-        import torch
+    frame = 512
+    _ctx = 64
 
-        self._torch = torch
-        self.model = model
-        self.model.reset_states()
+    def __init__(self, threshold: float = 0.5) -> None:
+        self.session = _silero()
+        self.threshold = threshold
+        self._state = np.zeros((2, 1, 128), dtype=np.float32)
+        self._context = np.zeros((1, self._ctx), dtype=np.float32)
+        self._sr = np.array(SR, dtype=np.int64)
+
+    def prob(self, frame: np.ndarray) -> float:
+        x = np.concatenate([self._context, frame.reshape(1, -1).astype(np.float32)], axis=1)
+        out, self._state = self.session.run(["output", "stateN"], {"input": x, "state": self._state, "sr": self._sr})
+        self._context = x[:, -self._ctx:]
+        return float(out[0][0])
 
     def is_speech(self, frame: np.ndarray) -> bool:
-        with self._torch.no_grad():
-            p = self.model(self._torch.from_numpy(frame), SR).item()
-        return p > 0.5
+        return self.prob(frame) >= self.threshold
 
 
 def make_vad(engine: str):
     if engine == "silero":
         try:
-            from silero_vad import load_silero_vad
-
-            return _SileroVAD(load_silero_vad(onnx=False))
+            return _SileroVAD()
         except Exception as e:  # pragma: no cover - depends on install
-            log.warning("silero-vad unavailable (%s), falling back to energy VAD", e)
+            log.warning("silero VAD (onnx) unavailable (%s), falling back to energy VAD", e)
     return _EnergyVAD()
 
 
@@ -150,14 +182,47 @@ class NullSTT(STTEngine):
         return ""
 
 
-class ParakeetSTT(STTEngine):
-    """Batches utterances from all concurrent calls onto one GPU model."""
+PARAKEET_MODEL = "nemo-parakeet-tdt-0.6b-v3"
+MIN_AUDIO_S = 0.4      # shorter clips are noise
+MAX_CHUNK_S = 20.0     # safe length for one model call
 
-    def __init__(self, model_name: str, device: str, window_ms: int, max_batch: int):
-        self.model_name = model_name
-        self.device = device
+
+def highpass(audio: np.ndarray, cutoff_hz: float = 80.0) -> np.ndarray:
+    """Removes desk rumble / 50 Hz hum without touching the speech band."""
+    if len(audio) < 16:
+        return audio.astype(np.float32)
+    from scipy.signal import butter, sosfilt
+
+    sos = butter(2, cutoff_hz, btype="highpass", fs=SR, output="sos")
+    return np.nan_to_num(sosfilt(sos, audio)).astype(np.float32)
+
+
+def normalize(audio: np.ndarray, target_peak: float = 0.92) -> np.ndarray:
+    """Peak-normalise quiet speech (up to x8), never amplify loud audio."""
+    peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
+    if 0.0001 < peak < 0.75:
+        return (audio * min(target_peak / peak, 8.0)).astype(np.float32)
+    if peak >= 1.0:
+        return (audio / (peak + 1e-6) * target_peak).astype(np.float32)
+    return audio.astype(np.float32)
+
+
+def prepare_audio(audio: np.ndarray) -> np.ndarray:
+    return normalize(highpass(audio))
+
+
+class ParakeetSTT(STTEngine):
+    """Parakeet TDT 0.6B v3 through onnx-asr: onnxruntime, CPU only, int8.
+
+    Utterances from all concurrent calls go through one model, in small batches.
+    """
+
+    def __init__(self, threads: int, model_path: str, window_ms: int, max_batch: int, polish_only: bool = True):
+        self.threads = max(1, int(threads))
+        self.model_path = (model_path or "").strip()
         self.window = window_ms / 1000
         self.max_batch = max_batch
+        self.polish_only = polish_only
         self.model = None
         self._q: asyncio.Queue[tuple[np.ndarray, asyncio.Future]] = asyncio.Queue()
 
@@ -167,16 +232,24 @@ class ParakeetSTT(STTEngine):
         asyncio.create_task(self._worker())
 
     def _load(self):
-        import nemo.collections.asr as nemo_asr  # heavy import, keep lazy
+        import onnx_asr
+        import onnxruntime as ort
 
-        log.info("loading %s on %s", self.model_name, self.device)
-        m = nemo_asr.models.ASRModel.from_pretrained(self.model_name)
-        m = m.to(self.device).eval()
-        # warm-up so the first real call doesn't pay CUDA init
-        m.transcribe([np.zeros(SR, dtype=np.float32)], batch_size=1, verbose=False)
+        if self.model_path and not Path(self.model_path).is_dir():
+            raise RuntimeError(f"PARAKEET_MODEL_PATH not found: {self.model_path}")
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = self.threads
+        opts.inter_op_num_threads = 1
+        log.info("loading %s (int8, CPU, %d threads)%s", PARAKEET_MODEL, self.threads,
+                 f" from {self.model_path}" if self.model_path else ", downloading from Hugging Face on first run")
+        m = onnx_asr.load_model(PARAKEET_MODEL, self.model_path or None, quantization="int8",
+                                sess_options=opts, providers=["CPUExecutionProvider"])
+        m.recognize(np.zeros(SR, dtype=np.float32), sample_rate=SR)  # warm-up
         return m
 
     async def transcribe(self, audio: np.ndarray) -> str:
+        if len(audio) < int(MIN_AUDIO_S * SR):
+            return ""
         fut = asyncio.get_running_loop().create_future()
         await self._q.put((audio, fut))
         return await fut
@@ -207,19 +280,24 @@ class ParakeetSTT(STTEngine):
                         fut.set_exception(e)
 
     def _run(self, audios: list[np.ndarray]) -> list[str]:
-        import torch
+        # utterances are capped by VAD (vad_max_utterance_s), but guard the model limit anyway
+        clips = [prepare_audio(a[: int(MAX_CHUNK_S * SR)]) for a in audios]
+        texts = self.model.recognize(clips, sample_rate=SR)
+        return [self._postprocess(t) for t in texts]
 
-        with torch.inference_mode():
-            hyps = self.model.transcribe(audios, batch_size=len(audios), verbose=False)
-        if isinstance(hyps, tuple):  # older NeMo returns (best, all)
-            hyps = hyps[0]
-        return [(h.text if hasattr(h, "text") else str(h)).strip() for h in hyps]
+    def _postprocess(self, text: str) -> str:
+        text = " ".join((text or "").split())
+        # v3 is multilingual and can't be forced to Polish; on quiet/unclear clips it sometimes
+        # returns short English phrases ("Yeah.", "Okay.") - drop those
+        if self.polish_only and is_foreign_language(text):
+            return ""
+        return text
 
 
 def make_stt(settings) -> STTEngine:
     if settings.stt_engine == "parakeet":
-        return ParakeetSTT(settings.parakeet_model, settings.stt_device,
-                           settings.stt_batch_window_ms, settings.stt_max_batch)
+        return ParakeetSTT(settings.parakeet_threads, settings.parakeet_model_path,
+                           settings.stt_batch_window_ms, settings.stt_max_batch, settings.stt_polish_only)
     return NullSTT()
 
 
