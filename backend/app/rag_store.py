@@ -17,17 +17,27 @@ log = logging.getLogger("rag")
 
 
 class Embedder:
-    """e5 models expect 'query: ' / 'passage: ' prefixes; vectors are L2-normalised."""
+    """e5 models expect 'query: ' / 'passage: ' prefixes; vectors are L2-normalised.
+
+    Uses sentence-transformers (torch) when installed; otherwise the ONNX export of the same
+    model on onnxruntime, so the all-in-one exe doesn't need torch.
+    """
 
     dim = 384
 
     def __init__(self, model_name: str, device: str | None = None):
-        from sentence_transformers import SentenceTransformer
-
-        self.model = SentenceTransformer(model_name, device=device)
-        self.model.encode(["query: rozgrzewka"], normalize_embeddings=True)  # warm-up
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError:
+            self.model = None
+            self._onnx = _OnnxE5(model_name)
+        else:
+            self.model = SentenceTransformer(model_name, device=device)
+        self._encode(["query: rozgrzewka"])  # warm-up
 
     def _encode(self, texts: list[str]) -> np.ndarray:
+        if self.model is None:
+            return self._onnx.encode(texts)
         return self.model.encode(texts, normalize_embeddings=True, convert_to_numpy=True)
 
     @lru_cache(maxsize=2048)
@@ -41,6 +51,49 @@ class Embedder:
 
     def embed_passages(self, texts: list[str]) -> np.ndarray:
         return self._encode([f"passage: {t}" for t in texts])
+
+
+# same weights, published with onnx/model.onnx (used if the main repo lacks an ONNX export)
+ONNX_MIRRORS = {"intfloat/multilingual-e5-small": ["Xenova/multilingual-e5-small"]}
+
+
+class _OnnxE5:
+    """multilingual-e5 from its ONNX export: tokenizer.json + onnx/model.onnx, mean pooling."""
+
+    def __init__(self, model_name: str):
+        import onnxruntime as ort
+        from huggingface_hub import hf_hub_download
+        from tokenizers import Tokenizer
+
+        repos = [model_name] + [r for r in ONNX_MIRRORS.get(model_name, []) if r != model_name]
+        for i, repo in enumerate(repos):
+            try:
+                tok = hf_hub_download(repo, "tokenizer.json")
+                onnx = hf_hub_download(repo, "onnx/model.onnx")
+                break
+            except Exception as e:
+                if i == len(repos) - 1:
+                    raise
+                log.warning("no ONNX export in %s (%s), trying %s", repo, e, repos[i + 1])
+        self.tok = Tokenizer.from_file(tok)
+        self.tok.enable_truncation(512)
+        self.tok.enable_padding()
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = 2
+        self.session = ort.InferenceSession(onnx, sess_options=opts, providers=["CPUExecutionProvider"])
+        self.inputs = {i.name for i in self.session.get_inputs()}
+
+    def encode(self, texts: list[str]) -> np.ndarray:
+        enc = self.tok.encode_batch(texts)
+        ids = np.array([e.ids for e in enc], dtype=np.int64)
+        mask = np.array([e.attention_mask for e in enc], dtype=np.int64)
+        feed = {"input_ids": ids, "attention_mask": mask}
+        if "token_type_ids" in self.inputs:
+            feed["token_type_ids"] = np.zeros_like(ids)
+        hidden = self.session.run(None, feed)[0]  # (batch, tokens, 384)
+        m = mask[..., None].astype(np.float32)
+        vec = (hidden * m).sum(1) / np.maximum(m.sum(1), 1e-9)
+        return (vec / np.linalg.norm(vec, axis=1, keepdims=True)).astype(np.float32)
 
 
 @dataclass

@@ -1,8 +1,17 @@
-# Optional: the app creates config.toml itself (server address + token window on first run).
+# Optional: the app creates config.toml next to itself (the Gemini key window on first run).
 # Copy to config.toml only to change the other settings.
-server_url = "ws://localhost:8000/ws"   # IP of the backend PC if it is another computer; wss:// behind TLS
-token = "change-me"                         # = AUTH_TOKEN on the backend
-agent_id = ""                               # empty = Windows user name
+
+# Gemini (also editable in the app: logo -> "Ustawienia (klucz Gemini)")
+gemini_api_key = ""                 # aistudio.google.com/apikey
+gemini_model = "gemini-3.8-flash"   # cheaper: gemini-3.5-flash-lite
+gemini_thinking_level = "low"       # off for 2.5 models
+
+# Knowledge base in Supabase (pgvector). Empty = hints without the knowledge base.
+database_url = ""
+
+# Speech recognition (Parakeet on the CPU, downloaded once, ~670 MB)
+parakeet_threads = 3
+parakeet_model_path = ""            # folder with the model files for PCs without internet
 
 # Audio. Empty = Windows defaults. Otherwise a part of the device name,
 # e.g. line_device = "Jabra" if Zadarma plays the call into a Jabra headset.

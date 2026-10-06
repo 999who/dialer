@@ -272,16 +272,21 @@ class HintCard(Card):
 
 
 # ------------------------------------------------------------------ errors
+INFO_KINDS = {"loading"}  # not an error: shown in the accent colour
+
 ERRORS = {
-    "server": ("BRAK POŁĄCZENIA Z SERWEREM",
+    "server": ("PODPOWIEDZI CHWILOWO NIEDOSTĘPNE",
                "Podpowiedzi są chwilowo niedostępne. Transkrypcja trwa dalej — gdy połączenie wróci, "
                "podpowiedzi nadrobią rozmowę.", "Połącz ponownie"),
-    "auth": ("SERWER ODRZUCIŁ TOKEN",
-             "Token nie zgadza się z AUTH_TOKEN na serwerze. Wpisz poprawny token w ustawieniach połączenia.",
-             "Ustawienia połączenia"),
     "no_llm": ("PODPOWIEDZI NIEDOSTĘPNE",
-               "Serwer nie może połączyć się z Gemini. Transkrypcja działa, ale podpowiedzi nie będą się "
-               "pojawiać. Sprawdź GEMINI_API_KEY i GEMINI_MODEL w backend\\.env.", "Połącz ponownie"),
+               "Gemini odrzuca zapytania. Transkrypcja działa, ale podpowiedzi nie będą się pojawiać. "
+               "Sprawdź klucz Gemini API w ustawieniach.", "Ustawienia"),
+    "loading": ("PRZYGOTOWANIE ROZPOZNAWANIA MOWY",
+                "Pierwsze uruchomienie pobiera model rozpoznawania mowy (~670 MB), to może potrwać kilka "
+                "minut. Kolejne starty zajmują kilkanaście sekund.", "Pokaż dziennik"),
+    "local_failed": ("NIE UDAŁO SIĘ URUCHOMIĆ PODPOWIEDZI",
+                     "Rozpoznawanie mowy nie wystartowało. Przy pierwszym uruchomieniu potrzebny jest internet "
+                     "do pobrania modelu. Szczegóły są w dzienniku.", "Pokaż dziennik"),
     "no_line": ("NIE SŁYCHAĆ LINII",
                 "Dźwięk rozmówcy nie dociera. Sprawdź, czy Zadarma wysyła dźwięk na wybrane urządzenie.",
                 "Wybierz urządzenie"),
@@ -299,16 +304,17 @@ class ErrorCard(Card):
     dismissed = pyqtSignal(str)
 
     def __init__(self, kind: str, note: str = ""):
-        super().__init__(border=T.ERROR_BORDER)
+        info = kind in INFO_KINDS
+        super().__init__(border=T.BORDER if info else T.ERROR_BORDER)
         self.kind = kind
         title, body, act = ERRORS[kind]
-        row, _, self.note = header_row(title, T.ERROR, note, icon="alert")
+        row, _, self.note = header_row(title, T.ACCENT if info else T.ERROR, note, icon="alert")
         self.body.addLayout(row)
         self.body.addWidget(text(body, T.serif(18), T.TEXT_STRONG, wrap=True))
         actions = QHBoxLayout()
         actions.setSpacing(6)
         actions.setContentsMargins(0, 4, 0, 0)
-        b = button(act, icon="retry", bg=T.ERROR, fg=T.ERROR_INK)
+        b = button(act, icon="retry", bg=T.ACCENT if info else T.ERROR, fg=T.ACCENT_INK if info else T.ERROR_INK)
         b.clicked.connect(lambda: self.action.emit(self.kind))
         hide = button("Ukryj", fg=T.TEXT, border=T.BORDER_SOFT, weight=500)
         hide.clicked.connect(lambda: self.dismissed.emit(self.kind))

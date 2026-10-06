@@ -4,3 +4,15 @@ soxr>=0.3.7
 psutil>=5.9
 PyAudioWPatch>=0.2.12; platform_system == "Windows"
 pycaw>=20240316; platform_system == "Windows"     # Zadarma audio sessions (call start/end)
+
+# Built-in backend ("Wszystko na tym komputerze"): the same code as backend/, no torch
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic-settings>=2.4
+scipy>=1.10
+google-genai>=1.40
+onnxruntime>=1.18.1,!=1.24.1,!=1.25.*,!=1.26.0
+onnx-asr[cpu,hub]>=0.12.0
+tokenizers>=0.19            # e5 embeddings via ONNX when DATABASE_URL is set
+asyncpg>=0.29
+pgvector>=0.3

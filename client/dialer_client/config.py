@@ -9,7 +9,6 @@ import sys
 import tomllib
 from dataclasses import dataclass, fields
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 
 log = logging.getLogger("config")
 
@@ -17,14 +16,18 @@ CLIENT_DIR = Path(__file__).resolve().parent.parent
 # run.py: config.toml lives in client/; EmanagerDialer.exe: next to the exe
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else CLIENT_DIR
 CONFIG_PATH = APP_DIR / "config.toml"
-DEFAULT_PORT = 8000
-PLACEHOLDER_TOKEN = "change-me"
 
 
 @dataclass
 class Config:
-    server_url: str = f"ws://localhost:{DEFAULT_PORT}/ws"
-    token: str = PLACEHOLDER_TOKEN
+    # speech recognition, RAG and Gemini all run inside this app (see local_server.py)
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.8-flash"
+    gemini_thinking_level: str = "low"
+    database_url: str = ""          # Supabase Postgres for the knowledge base; empty = no RAG
+    local_stt: str = "parakeet"     # parakeet | none
+    parakeet_threads: int = 3
+    parakeet_model_path: str = ""   # folder with the int8 ONNX files; empty = download (~670 MB) once
     agent_id: str = ""
     mic_device: str = ""        # substring of device name; empty = Windows default
     line_device: str = ""       # substring of the output Zadarma plays to; empty = default output
@@ -42,41 +45,9 @@ class Config:
     offline_buffer_s: int = 60
 
 
-def normalize_server_url(raw: str) -> str:
-    """Accepts what people actually type and returns ws://host:port/ws.
-
-    "localhost", " http://0.0.0.0:8000", "192.168.1.50:8000/" and "wss://dialer.example.com/ws"
-    all work: http(s) becomes ws(s), 0.0.0.0 (a listen address) becomes localhost, the port
-    defaults to 8000 for plain ws and the path to /ws.
-    """
-    s = raw.strip().strip("\"'").strip()
-    if not s:
-        return Config.server_url
-    if "://" not in s:
-        s = "ws://" + s
-    parts = urlsplit(s)
-    scheme = {"http": "ws", "https": "wss"}.get(parts.scheme.lower(), parts.scheme.lower())
-    if scheme not in ("ws", "wss"):
-        scheme = "ws"
-    host = parts.hostname or "localhost"
-    if host in ("0.0.0.0", "::", "*"):
-        host = "localhost"
-    if ":" in host:  # IPv6 literal
-        host = f"[{host}]"
-    try:
-        port = parts.port
-    except ValueError:
-        port = None
-    if port is None and scheme == "ws":
-        port = DEFAULT_PORT
-    path = parts.path.rstrip("/") or "/ws"
-    return urlunsplit((scheme, f"{host}:{port}" if port else host, path, parts.query, ""))
-
-
-def needs_setup(cfg: Config, path: Path = CONFIG_PATH) -> bool:
-    """First run, or config.toml still has the example server address. A wrong token is caught by
-    the server instead ("auth" error card), since AUTH_TOKEN may legitimately be anything."""
-    return not path.exists() or "your-server" in cfg.server_url.lower()
+def needs_setup(cfg: Config) -> bool:
+    """No Gemini key yet (first run)."""
+    return not cfg.gemini_api_key
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -89,8 +60,7 @@ def load_config(path: Path | None = None) -> Config:
             log.error("config.toml is broken, using defaults: %s", e)
     known = {f.name for f in fields(Config)}
     cfg = Config(**{k: v for k, v in data.items() if k in known})
-    cfg.server_url = normalize_server_url(cfg.server_url)
-    cfg.token = str(cfg.token).strip()
+    cfg.gemini_api_key = str(cfg.gemini_api_key).strip().strip("\"'")
     if not cfg.agent_id:
         cfg.agent_id = getpass.getuser()
     return cfg
