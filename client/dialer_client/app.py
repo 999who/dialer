@@ -8,14 +8,15 @@ import time
 from collections import deque
 from pathlib import Path
 
-from PyQt6.QtCore import QDir, QLockFile, QObject, QPoint, QSettings, QStandardPaths, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QDir, QLockFile, QObject, QPoint, QProcess, QSettings, QStandardPaths, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QAction, QActionGroup, QDesktopServices
 from PyQt6.QtWidgets import QApplication, QDialog, QMenu, QMessageBox, QSystemTrayIcon
 
 from . import theme as T
 from .config import CONFIG_PATH, Config, load_config, needs_setup, save_values
-from .connect_dialog import ConnectDialog
+from .settings_dialog import SettingsDialog
 from .detect import CallDetector, ZadarmaWatcher
+from .local_server import LocalServer
 from .net import BackendLink
 from .overlay import CORNERS, Overlay
 from .zadarma_audio import ZadarmaAudioWatcher
@@ -31,13 +32,14 @@ class Bridge(QObject):
 
 
 class DialerApp(QObject):
-    def __init__(self, cfg: Config, audio_factory=None):
+    def __init__(self, cfg: Config, local: LocalServer, audio_factory=None):
         super().__init__()
         self.cfg = cfg
+        self.local = local
         self.qs = QSettings("EMANAGER", "Dialer")
         corner = self.qs.value("corner", cfg.corner)
         self.overlay = Overlay(corner, cfg.hint_seconds, cfg.summary_seconds, cfg.opacity, cfg.show_in_taskbar)
-        self.link = BackendLink(cfg.server_url, cfg.token, cfg.agent_id, cfg.offline_buffer_s)
+        self.link = BackendLink(local.url, local.token, cfg.agent_id, cfg.offline_buffer_s)
         self.detector = CallDetector(end_silence_s=cfg.call_end_silence_s, no_line_s=cfg.no_line_warning_s)
         self.bridge = Bridge()
         self.preroll: deque[bytes] = deque(maxlen=30)  # 3 s, so the first words aren't lost
@@ -51,8 +53,7 @@ class DialerApp(QObject):
         self.bridge.zadarma_audio.connect(self._on_zadarma_audio)
         self.link.message.connect(self._on_message)
         self.link.online_changed.connect(self._on_online)
-        self.link.retry_in.connect(lambda s: self.overlay.show_error("server", f"ponowna próba za {s} s"))
-        self.link.auth_failed.connect(self._on_auth_failed)
+        self.link.retry_in.connect(self._on_retry)
         ov = self.overlay
         ov.hint_copied.connect(lambda hid: self.link.send({"type": "feedback", "hint_id": hid, "copied": True}))
         ov.hint_feedback.connect(lambda hid, u: self.link.send({"type": "feedback", "hint_id": hid, "useful": u}))
@@ -83,7 +84,10 @@ class DialerApp(QObject):
 
     def start(self) -> None:
         self.overlay.show()
-        self.link.connect_now()
+        # connect as soon as the built-in backend has loaded its models
+        self.overlay.show_error("loading")
+        self._local_timer = QTimer(self, interval=500, timeout=self._check_local)
+        self._local_timer.start()
         self.watcher.start()
         if self.cfg.call_detect == "zadarma":
             self.zwatch.start()
@@ -100,7 +104,7 @@ class DialerApp(QObject):
         self.tray.activated.connect(lambda *_: (self.overlay.showNormal(), self.overlay.reposition()))
         menu = QMenu()
         menu.addAction("Pokaż", lambda: (self.overlay.showNormal(), self.overlay.reposition()))
-        menu.addAction("Połączenie z serwerem…", lambda: self.open_connection_settings())
+        menu.addAction("Ustawienia (klucz Gemini)…", lambda: self.open_connection_settings())
         menu.addAction("Zamknij", QApplication.quit)
         self.tray.setContextMenu(menu)
         self.tray.show()
@@ -165,24 +169,34 @@ class DialerApp(QObject):
     def _on_online(self, online: bool) -> None:
         self.overlay.set_online(online, self.detector.in_call)
         if online:
-            self.overlay.clear_error("server")
+            for kind in ("server", "loading", "local_failed"):
+                self.overlay.clear_error(kind)
 
-    def _on_auth_failed(self) -> None:
-        self.overlay.clear_error("server")
-        self.overlay.show_error("auth")
+    def _check_local(self) -> None:
+        if self.local.state == "loading":
+            return
+        self._local_timer.stop()
+        if self.local.state == "ready":
+            self.link.connect_now()
+        else:
+            self.overlay.clear_error("loading")
+            self.overlay.show_error("local_failed", self.local.error[:40])
+
+    def _on_retry(self, seconds: int) -> None:
+        if self.local.state == "error":
+            self.overlay.clear_error("loading")
+            self.overlay.show_error("local_failed", self.local.error[:40])
+        elif self.local.state == "loading":
+            self.overlay.show_error("loading")
+        else:  # ready but the connection dropped: reconnects on its own
+            self.overlay.show_error("server", f"ponowna próba za {seconds} s")
 
     def open_connection_settings(self, reason: str = "") -> bool:
-        dlg = ConnectDialog(self.cfg.server_url, self.cfg.token, self.cfg.agent_id, reason)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
+        before = (self.cfg.gemini_api_key, self.cfg.gemini_model)
+        if not ask_settings(self.cfg, reason):
             return False
-        self.cfg.server_url, self.cfg.token = dlg.url, dlg.token
-        try:
-            save_values({"server_url": dlg.url, "token": dlg.token})
-        except OSError as e:
-            log.error("cannot save %s: %s", CONFIG_PATH, e)
-            QMessageBox.warning(None, "EMANAGER Dialer", f"Nie udało się zapisać {CONFIG_PATH}:\n{e}")
-        self.overlay.clear_error("auth")
-        self.link.set_target(dlg.url, dlg.token)
+        if (self.cfg.gemini_api_key, self.cfg.gemini_model) != before:
+            relaunch()  # the built-in backend reads the key and model at startup
         return True
 
     def _on_message(self, m: dict) -> None:
@@ -209,10 +223,12 @@ class DialerApp(QObject):
 
     # ---------------------------------------------------------------- actions
     def _on_error_action(self, kind: str) -> None:
-        if kind in ("server", "no_llm"):
+        if kind == "server":
             self.link.connect_now()
-        elif kind == "auth":
+        elif kind == "no_llm":
             self.open_connection_settings()
+        elif kind in ("loading", "local_failed"):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(_log_dir() / "dialer.log")))
         elif kind == "no_zadarma":
             self.watcher.kick.set()
         elif kind in ("no_line", "no_audio"):
@@ -251,7 +267,7 @@ class DialerApp(QObject):
                 a.triggered.connect(lambda _=False, k=key: self._set_corner(k))
                 group.addAction(a)
                 sub.addAction(a)
-            menu.addAction("Połączenie z serwerem…", lambda: self.open_connection_settings())
+            menu.addAction("Ustawienia (klucz Gemini)…", lambda: self.open_connection_settings())
             menu.addAction("Pokaż dziennik (log)", lambda: QDesktopServices.openUrl(
                 QUrl.fromLocalFile(str(_log_dir() / "dialer.log"))))
             menu.addSeparator()
@@ -299,6 +315,33 @@ class DialerApp(QObject):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
 
+_lock: QLockFile | None = None
+
+
+def ask_settings(cfg: Config, reason: str = "") -> bool:
+    """Settings window; on OK updates cfg and config.toml."""
+    dlg = SettingsDialog(cfg, reason)
+    if dlg.exec() != QDialog.DialogCode.Accepted:
+        return False
+    vals = dlg.values()
+    for k, v in vals.items():
+        setattr(cfg, k, v)
+    try:
+        save_values(vals)
+    except OSError as e:
+        log.error("cannot save %s: %s", CONFIG_PATH, e)
+        QMessageBox.warning(None, "EMANAGER Dialer", f"Nie udało się zapisać {CONFIG_PATH}:\n{e}")
+    return True
+
+
+def relaunch() -> None:
+    args = sys.argv[1:] if getattr(sys, "frozen", False) else sys.argv
+    if _lock is not None:
+        _lock.unlock()
+    QProcess.startDetached(sys.executable, args)
+    QApplication.quit()
+
+
 def _log_dir() -> Path:
     d = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
              or tempfile.gettempdir())
@@ -339,16 +382,20 @@ def main() -> int:
     app.setFont(T.sans(13))
     app.setWindowIcon(T.icon("logo_full", T.BRAND, 256))
 
-    lock = QLockFile(QDir.temp().filePath("emanager_dialer.lock"))
+    global _lock
+    lock = _lock = QLockFile(QDir.temp().filePath("emanager_dialer.lock"))
     lock.setStaleLockTime(0)
-    if not lock.tryLock(100):
+    if not lock.tryLock(3000):  # 3 s: a relaunch may still be shutting down the old instance
         QMessageBox.information(None, "EMANAGER Dialer",
                                 "EMANAGER Dialer już działa. Jego ikona jest w zasobniku systemowym obok zegara.")
         return 0
 
     cfg = load_config()
-    dialer = DialerApp(cfg)
     if needs_setup(cfg):
-        dialer.open_connection_settings()
+        ask_settings(cfg)
+    local = LocalServer(cfg)
+    local.start()
+    app.aboutToQuit.connect(local.stop)
+    dialer = DialerApp(cfg, local)
     dialer.start()
     return app.exec()
