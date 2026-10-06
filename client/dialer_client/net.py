@@ -22,6 +22,7 @@ class BackendLink(QObject):
     message = pyqtSignal(dict)
     online_changed = pyqtSignal(bool)
     retry_in = pyqtSignal(int)  # seconds until next reconnect attempt
+    auth_failed = pyqtSignal()  # wrong token: retrying won't help until the settings change
 
     def __init__(self, url: str, token: str, agent_id: str, buffer_s: int = 60):
         super().__init__()
@@ -33,6 +34,8 @@ class BackendLink(QObject):
         self.online = False
         self.ready = False
         self._attempt = 0
+        self._auth_failed = False
+        self._aborting = False
         self._countdown = 0
         self._timer = QTimer(self, interval=1000, timeout=self._tick)
         self._pending_text: list[str] = []
@@ -42,13 +45,24 @@ class BackendLink(QObject):
         self.phone = ""
 
     # ---------------------------------------------------------------- connection
+    def set_target(self, url: str, token: str) -> None:
+        self.url, self.token = url, token
+        self._attempt = 0
+        self.connect_now()
+
     def connect_now(self) -> None:
+        self._auth_failed = False
         self._timer.stop()
-        self.ws.abort()
+        self._aborting = True  # abort() emits disconnected synchronously; don't schedule a retry for it
+        try:
+            self.ws.abort()
+        finally:
+            self._aborting = False
         log.info("connecting to %s", self.url)
         self.ws.open(QUrl(self.url))
 
     def _on_connected(self) -> None:
+        self._timer.stop()
         self._attempt = 0
         self.ws.sendTextMessage(json.dumps({"type": "hello", "token": self.token, "agent_id": self.agent_id,
                                             "sample_rate": 16000, "channels": 2, "format": "s16le"}))
@@ -73,6 +87,7 @@ class BackendLink(QObject):
             self._pending_text.clear()
         elif msg.get("type") == "error" and msg.get("code") == "auth":
             log.error("backend rejected token")
+            self._auth_failed = True
         self.message.emit(msg)
 
     def _on_disconnected(self) -> None:
@@ -80,6 +95,11 @@ class BackendLink(QObject):
         self.online = self.ready = False
         if was:
             self.online_changed.emit(False)
+        if self._aborting:
+            return
+        if self._auth_failed:
+            self.auth_failed.emit()
+            return
         delay = BACKOFF[min(self._attempt, len(BACKOFF) - 1)]
         self._attempt += 1
         self._countdown = delay

@@ -1,0 +1,64 @@
+name: Client exe
+
+on:
+  push:
+    branches: [main]
+    paths: ["client/**", ".github/workflows/client-exe.yml"]
+  pull_request:
+    paths: ["client/**", ".github/workflows/client-exe.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: client/requirements.txt
+
+      - name: Install
+        working-directory: client
+        run: python -m pip install -r requirements.txt pyinstaller pytest
+
+      - name: Test
+        working-directory: client
+        run: python -m pytest -q tests
+
+      - name: Build EmanagerDialer.exe
+        working-directory: client
+        run: pyinstaller -y EmanagerDialer.spec
+
+      - name: Smoke test (demo mode starts and keeps running)
+        working-directory: client
+        shell: pwsh
+        run: |
+          $p = Start-Process dist\EmanagerDialer.exe -ArgumentList "--demo" -PassThru
+          Start-Sleep -Seconds 10
+          if ($p.HasExited) { throw "EmanagerDialer.exe exited with code $($p.ExitCode)" }
+          Stop-Process -Id $p.Id
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EmanagerDialer
+          path: client/dist/EmanagerDialer.exe
+
+      # Fixed download link that always has the build from main:
+      # https://github.com/<owner>/<repo>/releases/download/client-latest/EmanagerDialer.exe
+      - name: Publish to the "client-latest" release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete client-latest --cleanup-tag --yes || true
+          gh release create client-latest client/dist/EmanagerDialer.exe \
+            --target "$GITHUB_SHA" \
+            --title "EmanagerDialer.exe (najnowsza wersja)" \
+            --notes "Automatyczna kompilacja klienta z gałęzi main, commit $GITHUB_SHA."

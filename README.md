@@ -43,6 +43,11 @@ EMANAGER.PRO.
 2. Строку подключения взять в Project Settings → Database (Session pooler, порт 5432) и положить в `DATABASE_URL`.
 
 ### 2. Бэкенд (любой ПК или сервер, Windows или Linux, видеокарта не нужна)
+На Windows проще всего дважды кликнуть `backend\start_backend.bat`. При первом запуске он создаст
+`backend\.venv`, поставит зависимости (CPU-версия torch, без CUDA), откроет `.env` в Блокноте для ключей
+и запустит сервер. Следующие запуски сразу стартуют сервер.
+
+Вручную то же самое:
 ```bash
 cd backend
 python -m venv .venv && . .venv/bin/activate          # Windows: .venv\Scripts\activate
@@ -59,14 +64,28 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 `python -m tools.simulate_call --script tools/demo_dialogue.txt --token <AUTH_TOKEN>`.
 Для проверки Parakeet: `--wav call.wav` (стерео 16 кГц, L = оператор, R = клиент).
 
-### 3. Клиент (Windows 10/11, Python 3.11+)
+### 3. Клиент (Windows 10/11)
+Скачайте `EmanagerDialer.exe` со страницы релиза
+[client-latest](https://github.com/999who/dialer/releases/download/client-latest/EmanagerDialer.exe)
+(собирается автоматически из `main`, Python не нужен), положите в любую папку и запустите. При первом
+запуске откроется окно «Połączenie z serwerem»: адрес сервера (`localhost`, если бэкенд на этом же ПК,
+иначе IP сервера) и токен (`AUTH_TOKEN` из `backend\.env`). Кнопка «Sprawdź i zapisz» проверяет
+подключение и сохраняет `config.toml` рядом с exe. Поменять адрес позже можно через логотип на панели →
+«Połączenie z serwerem…». Адрес можно вводить в любом виде (`localhost`, `192.168.1.50:8000`,
+`http://0.0.0.0:8000`), клиент сам приведёт его к `ws://…:8000/ws`.
+
+Оверлей виден в панели задач и в трее. Лог лежит в `%LOCALAPPDATA%\EMANAGER\EMANAGER Dialer\dialer.log`
+(логотип → «Pokaż dziennik»). Если Windows SmartScreen предупредит о неизвестном издателе, нажмите
+«Подробнее» → «Выполнить в любом случае»: exe не подписан сертификатом.
+
+Запуск из исходников и сборка exe вручную:
 ```bat
 cd client
 python -m venv .venv && .venv\Scripts\activate
 pip install -r requirements.txt
-copy config.example.toml config.toml   :: server_url, token
 python run.py --demo    :: только UI, без звука и сервера
 python run.py
+pip install pyinstaller && pyinstaller EmanagerDialer.spec   :: -> dist\EmanagerDialer.exe
 ```
 Если Zadarma выводит звук не в устройство по умолчанию (например, в гарнитуру), выберите его через
 логотип на панели → «Dźwięk rozmówcy» или укажите `line_device` в `config.toml`.

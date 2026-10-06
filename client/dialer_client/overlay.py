@@ -21,17 +21,23 @@ CORNERS = {"bottom-right": "Prawy dolny róg", "bottom-left": "Lewy dolny róg",
            "top-right": "Prawy górny róg", "top-left": "Lewy górny róg"}
 
 
-def make_noactivate(widget: QWidget) -> None:
-    """On Windows Qt's WindowDoesNotAcceptFocus is not always enough: add WS_EX_NOACTIVATE."""
+def make_noactivate(widget: QWidget, taskbar: bool = True) -> None:
+    """On Windows Qt's WindowDoesNotAcceptFocus is not always enough: add WS_EX_NOACTIVATE.
+
+    A WS_EX_NOACTIVATE window gets no taskbar button by default, so WS_EX_APPWINDOW puts it back
+    when `taskbar` is on; otherwise WS_EX_TOOLWINDOW keeps it tray-only.
+    """
     if sys.platform != "win32":
         return
     import ctypes
 
-    GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST = -20, 0x08000000, 0x00000080, 0x00000008
+    GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_APPWINDOW = (
+        -20, 0x08000000, 0x00000080, 0x00000008, 0x00040000)
     hwnd = int(widget.winId())
     user32 = ctypes.windll.user32
-    style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-    user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST)
+    style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE) | WS_EX_NOACTIVATE | WS_EX_TOPMOST
+    style = (style | WS_EX_APPWINDOW) & ~WS_EX_TOOLWINDOW if taskbar else (style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
+    user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
 
 
 class Overlay(QWidget):
@@ -44,11 +50,15 @@ class Overlay(QWidget):
     open_transcript = pyqtSignal(dict)
 
     def __init__(self, corner: str = "bottom-right", hint_seconds: float = 20, summary_seconds: float = 45,
-                 opacity: float = 0.96):
+                 opacity: float = 0.96, taskbar: bool = True):
         super().__init__(None)
         self.setWindowTitle("EMANAGER Dialer")
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint |
-                            Qt.WindowType.Tool | Qt.WindowType.WindowDoesNotAcceptFocus)
+        self.taskbar = taskbar
+        flags = (Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint |
+                 Qt.WindowType.WindowDoesNotAcceptFocus)
+        if not taskbar:  # Qt.Tool = no taskbar button, the tray icon is the only handle
+            flags |= Qt.WindowType.Tool
+        self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.corner = corner if corner in CORNERS else "bottom-right"
@@ -138,7 +148,7 @@ class Overlay(QWidget):
 
     def showEvent(self, e):
         super().showEvent(e)
-        make_noactivate(self)
+        make_noactivate(self, self.taskbar)
         QTimer.singleShot(0, self.reposition)
 
     def _pin(self, on: bool) -> None:

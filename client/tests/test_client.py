@@ -58,3 +58,37 @@ def test_detector_ignores_operator_only_audio():
     for i in range(100):
         assert d.update(0.05, 0.0, i * 0.1) is None
     assert not d.in_call
+
+
+def test_normalize_server_url_accepts_what_people_type():
+    from dialer_client.config import normalize_server_url as n
+
+    assert n(' http://0.0.0.0:8000') == "ws://localhost:8000/ws"
+    assert n("localhost") == "ws://localhost:8000/ws"
+    assert n("192.168.1.50:9000/") == "ws://192.168.1.50:9000/ws"
+    assert n("ws://localhost:8000/ws") == "ws://localhost:8000/ws"
+    assert n("https://dialer.example.com") == "wss://dialer.example.com/ws"
+    assert n("") == "ws://localhost:8000/ws"
+
+
+def test_save_values_keeps_comments_and_other_keys(tmp_path):
+    from dialer_client.config import load_config, needs_setup, save_values
+
+    p = tmp_path / "config.toml"
+    assert needs_setup(load_config(p), p)
+    p.write_text('# comment\nserver_url = "ws://YOUR-SERVER:8000/ws"   # note\nmic_gain = 1.5\n', encoding="utf-8")
+    assert needs_setup(load_config(p), p)
+    save_values({"server_url": "ws://localhost:8000/ws", "token": 'a"b'}, p)
+    text = p.read_text(encoding="utf-8")
+    assert text.startswith("# comment\n") and "mic_gain = 1.5" in text
+    cfg = load_config(p)
+    assert cfg.server_url == "ws://localhost:8000/ws" and cfg.token == 'a"b' and cfg.mic_gain == 1.5
+    assert not needs_setup(cfg, p)
+
+
+def test_broken_config_falls_back_to_defaults(tmp_path):
+    from dialer_client.config import load_config
+
+    p = tmp_path / "config.toml"
+    p.write_text('server_url = "ws://x\n', encoding="utf-8")
+    assert load_config(p).server_url == "ws://localhost:8000/ws"

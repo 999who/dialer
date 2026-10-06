@@ -4,3 +4,5 @@ __pycache__/
 .pytest_cache/
 .env
 client/config.toml
+client/build/
+client/dist/
