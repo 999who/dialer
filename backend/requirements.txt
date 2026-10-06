@@ -1,0 +1,19 @@
+# --- server ---
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic-settings>=2.4
+numpy>=1.26
+
+# --- LLM (Gemini) ---
+google-genai>=1.40
+
+# --- RAG: embeddings + Supabase Postgres (pgvector) ---
+sentence-transformers>=3.0     # intfloat/multilingual-e5-small
+asyncpg>=0.29
+pgvector>=0.3
+
+# --- VAD ---
+silero-vad>=5.1
+
+# --- STT: NVIDIA Parakeet (needs CUDA GPU; install torch for your CUDA first) ---
+# pip install "nemo_toolkit[asr]>=2.4"

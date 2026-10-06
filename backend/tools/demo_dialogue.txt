@@ -1,0 +1,12 @@
+# K = klient, O = operator (konsultant)
+O: Dzień dobry, EMANAGER, nazywam się Anna, w czym mogę pomóc?
+K: Dzień dobry, szukamy kogoś do reklam w Google i chyba nowej strony.
+O: Świetnie, a ile osób liczy Pana firma?
+K: Jest nas około dwunastu.
+K: A ile kosztuje taki CRM dla firmy na osiem osób?
+O: Yyy… to zależy…
+K: Szczerze mówiąc, to brzmi dla nas trochę drogo.
+O: Gwarantuję, że będzie minimum 50 klientów miesięcznie.
+K: A konta reklamowe będą moje?
+O: Tak, zawsze zakładamy je na Pana dane i wszystko zostaje u Pana.
+K: Dobrze, muszę się jeszcze zastanowić.
