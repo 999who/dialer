@@ -8,12 +8,13 @@ import time
 from collections import deque
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QPoint, QSettings, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QDir, QLockFile, QObject, QPoint, QSettings, QStandardPaths, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QAction, QActionGroup, QDesktopServices
-from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+from PyQt6.QtWidgets import QApplication, QDialog, QMenu, QMessageBox, QSystemTrayIcon
 
 from . import theme as T
-from .config import Config, load_config
+from .config import CONFIG_PATH, Config, load_config, needs_setup, save_values
+from .connect_dialog import ConnectDialog
 from .detect import CallDetector, ZadarmaWatcher
 from .net import BackendLink
 from .overlay import CORNERS, Overlay
@@ -33,7 +34,7 @@ class DialerApp(QObject):
         self.cfg = cfg
         self.qs = QSettings("EMANAGER", "Dialer")
         corner = self.qs.value("corner", cfg.corner)
-        self.overlay = Overlay(corner, cfg.hint_seconds, cfg.summary_seconds, cfg.opacity)
+        self.overlay = Overlay(corner, cfg.hint_seconds, cfg.summary_seconds, cfg.opacity, cfg.show_in_taskbar)
         self.link = BackendLink(cfg.server_url, cfg.token, cfg.agent_id, cfg.offline_buffer_s)
         self.detector = CallDetector(end_silence_s=cfg.call_end_silence_s, no_line_s=cfg.no_line_warning_s)
         self.bridge = Bridge()
@@ -47,6 +48,7 @@ class DialerApp(QObject):
         self.link.message.connect(self._on_message)
         self.link.online_changed.connect(self._on_online)
         self.link.retry_in.connect(lambda s: self.overlay.show_error("server", f"ponowna próba za {s} s"))
+        self.link.auth_failed.connect(self._on_auth_failed)
         ov = self.overlay
         ov.hint_copied.connect(lambda hid: self.link.send({"type": "feedback", "hint_id": hid, "copied": True}))
         ov.hint_feedback.connect(lambda hid, u: self.link.send({"type": "feedback", "hint_id": hid, "useful": u}))
@@ -89,6 +91,7 @@ class DialerApp(QObject):
         self.tray.activated.connect(lambda *_: (self.overlay.showNormal(), self.overlay.reposition()))
         menu = QMenu()
         menu.addAction("Pokaż", lambda: (self.overlay.showNormal(), self.overlay.reposition()))
+        menu.addAction("Połączenie z serwerem…", lambda: self.open_connection_settings())
         menu.addAction("Zamknij", QApplication.quit)
         self.tray.setContextMenu(menu)
         self.tray.show()
@@ -147,6 +150,24 @@ class DialerApp(QObject):
         if online:
             self.overlay.clear_error("server")
 
+    def _on_auth_failed(self) -> None:
+        self.overlay.clear_error("server")
+        self.overlay.show_error("auth")
+
+    def open_connection_settings(self, reason: str = "") -> bool:
+        dlg = ConnectDialog(self.cfg.server_url, self.cfg.token, self.cfg.agent_id, reason)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        self.cfg.server_url, self.cfg.token = dlg.url, dlg.token
+        try:
+            save_values({"server_url": dlg.url, "token": dlg.token})
+        except OSError as e:
+            log.error("cannot save %s: %s", CONFIG_PATH, e)
+            QMessageBox.warning(None, "EMANAGER Dialer", f"Nie udało się zapisać {CONFIG_PATH}:\n{e}")
+        self.overlay.clear_error("auth")
+        self.link.set_target(dlg.url, dlg.token)
+        return True
+
     def _on_message(self, m: dict) -> None:
         t = m.get("type")
         if t == "transcript":
@@ -166,6 +187,8 @@ class DialerApp(QObject):
     def _on_error_action(self, kind: str) -> None:
         if kind == "server":
             self.link.connect_now()
+        elif kind == "auth":
+            self.open_connection_settings()
         elif kind == "no_zadarma":
             self.watcher.kick.set()
         elif kind in ("no_line", "no_audio"):
@@ -204,6 +227,9 @@ class DialerApp(QObject):
                 a.triggered.connect(lambda _=False, k=key: self._set_corner(k))
                 group.addAction(a)
                 sub.addAction(a)
+            menu.addAction("Połączenie z serwerem…", lambda: self.open_connection_settings())
+            menu.addAction("Pokaż dziennik (log)", lambda: QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(_log_dir() / "dialer.log"))))
             menu.addSeparator()
             if self.detector.in_call:
                 menu.addAction("Zakończ rozmowę", lambda: (self.detector.force(False), self._call_ended()))
@@ -249,13 +275,56 @@ class DialerApp(QObject):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
 
+def _log_dir() -> Path:
+    d = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
+             or tempfile.gettempdir())
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _setup_logging() -> Path:
+    path = _log_dir() / "dialer.log"
+    handlers: list[logging.Handler] = [logging.FileHandler(path, mode="w", encoding="utf-8")]
+    if sys.stderr is not None:  # EmanagerDialer.exe has no console
+        handlers.append(logging.StreamHandler())
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+                        handlers=handlers)
+    return path
+
+
+def _set_app_id() -> None:
+    """Own taskbar identity on Windows (icon and grouping), instead of python.exe's."""
+    if sys.platform == "win32":
+        import ctypes
+
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("EMANAGER.Dialer")
+        except Exception:
+            pass
+
+
 def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    _set_app_id()
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("EMANAGER Dialer")
+    app.setOrganizationName("EMANAGER")
+    log_path = _setup_logging()
+    log.info("log file: %s, config: %s", log_path, CONFIG_PATH)
     T.load_fonts()
     app.setFont(T.sans(13))
-    dialer = DialerApp(load_config())
+    app.setWindowIcon(T.icon("logo_full", T.BRAND, 256))
+
+    lock = QLockFile(QDir.temp().filePath("emanager_dialer.lock"))
+    lock.setStaleLockTime(0)
+    if not lock.tryLock(100):
+        QMessageBox.information(None, "EMANAGER Dialer",
+                                "EMANAGER Dialer już działa. Jego ikona jest w zasobniku systemowym obok zegara.")
+        return 0
+
+    cfg = load_config()
+    dialer = DialerApp(cfg)
+    if needs_setup(cfg):
+        dialer.open_connection_settings()
     dialer.start()
     return app.exec()

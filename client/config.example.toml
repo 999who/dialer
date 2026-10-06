@@ -1,5 +1,6 @@
-# Copy to config.toml and adjust.
-server_url = "ws://YOUR-SERVER:8000/ws"   # use wss:// behind a TLS reverse proxy in production
+# Optional: the app creates config.toml itself (server address + token window on first run).
+# Copy to config.toml only to change the other settings.
+server_url = "ws://localhost:8000/ws"   # IP of the backend PC if it is another computer; wss:// behind TLS
 token = "change-me"                         # = AUTH_TOKEN on the backend
 agent_id = ""                               # empty = Windows user name
 
@@ -15,6 +16,7 @@ corner = "bottom-right"   # bottom-right | bottom-left | top-right | top-left
 hint_seconds = 20
 summary_seconds = 45
 opacity = 0.96
+show_in_taskbar = true   # false = tray icon only
 
 # Call detection (no Zadarma API locally: inferred from audio)
 call_end_silence_s = 15

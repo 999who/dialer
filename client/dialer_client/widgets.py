@@ -276,6 +276,9 @@ ERRORS = {
     "server": ("BRAK POŁĄCZENIA Z SERWEREM",
                "Podpowiedzi są chwilowo niedostępne. Transkrypcja trwa dalej — gdy połączenie wróci, "
                "podpowiedzi nadrobią rozmowę.", "Połącz ponownie"),
+    "auth": ("SERWER ODRZUCIŁ TOKEN",
+             "Token nie zgadza się z AUTH_TOKEN na serwerze. Wpisz poprawny token w ustawieniach połączenia.",
+             "Ustawienia połączenia"),
     "no_line": ("NIE SŁYCHAĆ LINII",
                 "Dźwięk rozmówcy nie dociera. Sprawdź, czy Zadarma wysyła dźwięk na wybrane urządzenie.",
                 "Wybierz urządzenie"),
