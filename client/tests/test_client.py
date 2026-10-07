@@ -209,3 +209,27 @@ def test_release_is_newer_only_for_a_different_build(monkeypatch):
     assert not rel.newer
     monkeypatch.setattr(updater, "BUILD", "def")
     assert rel.newer
+
+
+def test_model_download_progress_counts_cache_bytes(tmp_path):
+    from dialer_client.model_download import DownloadProgress
+
+    dl = DownloadProgress(tmp_path, fetch_total=False)
+    dl.total = 1000
+    (tmp_path / "blobs").mkdir()
+    part = tmp_path / "blobs" / "abc.incomplete"
+    part.write_bytes(b"x" * 300)
+    frac, label = dl.status()
+    assert frac == 0.3 and label.endswith("MB")
+    part.write_bytes(b"x" * 1000)  # finished
+    assert dl.status() is None
+
+
+def test_model_already_downloaded_shows_no_progress(tmp_path):
+    from dialer_client.model_download import DownloadProgress
+
+    (tmp_path / "snapshots").mkdir()
+    (tmp_path / "snapshots" / "encoder-model.int8.onnx").write_bytes(b"x" * 500)
+    dl = DownloadProgress(tmp_path, fetch_total=False)
+    dl.total = 10_000
+    assert dl.status() is None  # nothing new arrives: only loading from disk

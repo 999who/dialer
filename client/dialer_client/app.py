@@ -18,6 +18,7 @@ from .config import CONFIG_PATH, Config, load_config, needs_setup, save_values
 from .settings_dialog import SettingsDialog
 from .detect import CallDetector, ZadarmaWatcher
 from .local_server import LocalServer
+from .model_download import DownloadProgress
 from .net import BackendLink
 from .overlay import CORNERS, Overlay
 from .zadarma_audio import ZadarmaAudioWatcher
@@ -92,6 +93,12 @@ class DialerApp(QObject):
         self.overlay.show()
         # connect as soon as the built-in backend has loaded its models
         self.overlay.show_error("loading")
+        self._download = None
+        if self.cfg.local_stt == "parakeet" and not self.cfg.parakeet_model_path:
+            try:
+                self._download = DownloadProgress()
+            except Exception as e:  # progress is only a nicety
+                log.info("model download progress unavailable: %s", e)
         self._local_timer = QTimer(self, interval=500, timeout=self._check_local)
         self._local_timer.start()
         if updater.can_self_update():
@@ -217,6 +224,11 @@ class DialerApp(QObject):
 
     def _check_local(self) -> None:
         if self.local.state == "loading":
+            st = self._download.status() if self._download else None
+            if st:
+                self.overlay.set_error_progress("loading", st[0], st[1])
+            else:
+                self.overlay.set_error_progress("loading", None)
             return
         self._local_timer.stop()
         if self.local.state == "ready":
