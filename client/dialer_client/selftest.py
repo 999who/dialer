@@ -2,7 +2,7 @@
 
 Starts the built-in backend with speech recognition off, waits until it accepts a WebSocket
 "hello", and checks that the pieces local mode needs are inside the build: the Silero VAD
-model, the master prompt and onnx-asr. Exit code 0 = OK; details go to the log.
+model, the master prompt and onnx-asr, and that the update check reaches GitHub. Exit code 0 = OK; details go to the log.
 """
 from __future__ import annotations
 
@@ -49,6 +49,16 @@ def main() -> int:
 
         _SileroVAD().prob(__import__("numpy").zeros(512, dtype="float32"))
         assert PROMPT.exists(), f"missing {PROMPT}"
+        import urllib.error
+
+        from . import updater
+
+        "api.github.com".encode("idna")  # urllib needs this codec for https host names
+        try:  # the update check works inside the exe (https, certificates, JSON)
+            rel = updater.fetch_release()
+            log.info("release %s, %d bytes", rel.commit[:7], rel.size)
+        except urllib.error.HTTPError as e:  # GitHub answered (e.g. rate limit on shared CI runners)
+            log.warning("release check answered %s, not a build problem", e.code)
         log.info("SELFTEST OK")
         srv.stop()
         return 0
