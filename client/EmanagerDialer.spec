@@ -24,7 +24,7 @@ a = Analysis(
         *copy_metadata("google-genai"),
     ],
     hiddenimports=[
-        "dialer_client.demo", "dialer_client.app", "dialer_client.selftest",
+        "dialer_client.demo", "dialer_client.app", "dialer_client.selftest", "dialer_client._build",
         "app.main", "app.config", "app.stt", "app.llm", "app.session", "app.rag_store", "app.langfilter",
         *collect_submodules("uvicorn"), *collect_submodules("websockets"), *collect_submodules("onnx_asr"),
     ],

@@ -33,7 +33,7 @@ def check_gemini(key: str, model: str) -> str:
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, cfg, reason: str = "", parent=None):
+    def __init__(self, cfg, reason: str = "", parent=None, on_check_updates=None):
         super().__init__(parent)
         self.setWindowTitle("EMANAGER Dialer · ustawienia")
         self.setWindowIcon(T.icon("logo_full", T.BRAND, 64))
@@ -85,6 +85,19 @@ class SettingsDialog(QDialog):
         self.status = QLabel("")
         self.status.setWordWrap(True)
         root.addWidget(self.status)
+
+        from . import updater
+
+        ver = QHBoxLayout()
+        ver_lbl = QLabel(f"Wersja: {updater.version_label()}")
+        ver_lbl.setStyleSheet(f"color:{T.MUTED};")
+        ver.addWidget(ver_lbl)
+        ver.addStretch(1)
+        if on_check_updates is not None:
+            upd = QPushButton("Sprawdź aktualizacje")
+            upd.clicked.connect(lambda: (self.reject(), on_check_updates()))
+            ver.addWidget(upd)
+        root.addLayout(ver)
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)

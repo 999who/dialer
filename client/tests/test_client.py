@@ -87,7 +87,7 @@ def test_broken_config_falls_back_to_defaults(tmp_path):
 def _z(mic=False, out=False, peak=0.0):
     from dialer_client.zadarma_audio import ZadarmaAudio
 
-    return ZadarmaAudio(available=True, found=True, mic_active=mic, out_active=out, out_peak=peak)
+    return ZadarmaAudio(available=True, found=True, mic_active=mic, out_active=out, out_peak=peak, out_found=True)
 
 
 def test_system_sound_does_not_start_a_call_when_zadarma_is_idle():
@@ -123,6 +123,8 @@ def test_line_gate_mutes_other_apps_only_while_zadarma_is_silent():
     assert w.gate_open()  # nothing known yet
     w.state = ZadarmaAudio(available=True, found=False)
     assert w.gate_open()  # Zadarma not seen: never mute
+    w.state = ZadarmaAudio(available=True, found=True, mic_active=True)
+    assert w.gate_open()  # only Zadarma's microphone is visible, its playback isn't: never mute
     w.state = _z(mic=True, out=True)
     assert not w.gate_open()  # Zadarma silent -> loopback is someone else's sound
     w._last_sound = time.monotonic()
@@ -150,3 +152,60 @@ def test_gemini_key_is_cleaned(tmp_path):
     p = tmp_path / "config.toml"
     save_values({"gemini_api_key": ' "AIzaXYZ" '}, p)
     assert load_config(p).gemini_api_key == "AIzaXYZ"
+
+
+def test_follows_zadarma_devices_during_a_call():
+    from types import SimpleNamespace
+
+    from dialer_client.app import DialerApp
+
+    calls = []
+    audio = SimpleNamespace(line_device=SimpleNamespace(name="Głośniki (Realtek) [Loopback]"),
+                            mic_device=SimpleNamespace(name="Mikrofon (Realtek)"),
+                            restart=lambda **kw: calls.append(kw))
+    fake = SimpleNamespace(audio=audio, cfg=SimpleNamespace(line_device="", mic_device=""),
+                           qs=SimpleNamespace(value=lambda k, d="": ""), overlay=SimpleNamespace(
+                               clear_error=lambda k: None, show_error=lambda *a: None))
+    fake._auto_device = lambda key: DialerApp._auto_device(fake, key)
+    st = _z(mic=True, out=True, peak=0.3)
+    st.out_device, st.mic_device = "Słuchawki (Jabra Evolve2)", "Mikrofon (Jabra Evolve2)"
+    DialerApp._follow_zadarma_devices(fake, _z())  # no call yet: nothing changes
+    DialerApp._follow_zadarma_devices(fake, st)
+    DialerApp._follow_zadarma_devices(fake, st)  # same switch is not retried
+    assert calls == [{"line_name": "Słuchawki (Jabra Evolve2)", "mic_name": "Mikrofon (Jabra Evolve2)"}]
+
+
+def test_call_starts_by_loopback_when_zadarma_playback_is_not_metered():
+    from dialer_client.zadarma_audio import ZadarmaAudio
+
+    d = CallDetector()
+    z = ZadarmaAudio(available=True, found=True, mic_active=True)  # only the microphone session is visible
+    events = [d.update(0.0, 0.05, i * 0.1, zadarma=z) for i in range(10)]
+    assert "start" in events
+
+
+def test_update_swaps_the_running_exe_and_cleans_up(tmp_path, monkeypatch):
+    from dialer_client import updater
+
+    exe = tmp_path / "EmanagerDialer.exe"
+    exe.write_bytes(b"old")
+    new = tmp_path / "EmanagerDialer.download"
+    new.write_bytes(b"new")
+    monkeypatch.setattr(sys, "executable", str(exe))
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    updater.install(new)
+    assert exe.read_bytes() == b"new" and (tmp_path / "EmanagerDialer.old").read_bytes() == b"old"
+    updater.cleanup()
+    assert not (tmp_path / "EmanagerDialer.old").exists()
+
+
+def test_release_is_newer_only_for_a_different_build(monkeypatch):
+    from dialer_client import updater
+
+    rel = updater.Release("abc", "u", 1, "")
+    monkeypatch.setattr(updater, "BUILD", "")
+    assert not rel.newer  # running from source: never offer
+    monkeypatch.setattr(updater, "BUILD", "abc")
+    assert not rel.newer
+    monkeypatch.setattr(updater, "BUILD", "def")
+    assert rel.newer

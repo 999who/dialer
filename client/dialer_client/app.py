@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import sys
 import tempfile
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -20,6 +21,7 @@ from .local_server import LocalServer
 from .net import BackendLink
 from .overlay import CORNERS, Overlay
 from .zadarma_audio import ZadarmaAudioWatcher
+from . import updater
 
 log = logging.getLogger("app")
 
@@ -29,6 +31,7 @@ class Bridge(QObject):
     frame = pyqtSignal(bytes, float, float)
     zadarma = pyqtSignal(object)
     zadarma_audio = pyqtSignal(object)
+    update = pyqtSignal(str, object)  # (event, payload) from the updater thread
 
 
 class DialerApp(QObject):
@@ -51,6 +54,9 @@ class DialerApp(QObject):
         self.bridge.frame.connect(self._on_frame)
         self.bridge.zadarma.connect(self._on_zadarma)
         self.bridge.zadarma_audio.connect(self._on_zadarma_audio)
+        self.bridge.update.connect(self._on_update_event)
+        self._release = None
+        self._updating = False
         self.link.message.connect(self._on_message)
         self.link.online_changed.connect(self._on_online)
         self.link.retry_in.connect(self._on_retry)
@@ -88,6 +94,10 @@ class DialerApp(QObject):
         self.overlay.show_error("loading")
         self._local_timer = QTimer(self, interval=500, timeout=self._check_local)
         self._local_timer.start()
+        if updater.can_self_update():
+            QTimer.singleShot(15000, lambda: self.check_updates(manual=False))
+            self._update_timer = QTimer(self, interval=6 * 3600 * 1000, timeout=lambda: self.check_updates(False))
+            self._update_timer.start()
         self.watcher.start()
         if self.cfg.call_detect == "zadarma":
             self.zwatch.start()
@@ -105,6 +115,7 @@ class DialerApp(QObject):
         menu = QMenu()
         menu.addAction("Pokaż", lambda: (self.overlay.showNormal(), self.overlay.reposition()))
         menu.addAction("Ustawienia (klucz Gemini)…", lambda: self.open_connection_settings())
+        menu.addAction("Sprawdź aktualizacje", lambda: self.check_updates(manual=True))
         menu.addAction("Zamknij", QApplication.quit)
         self.tray.setContextMenu(menu)
         self.tray.show()
@@ -154,9 +165,41 @@ class DialerApp(QObject):
     def _on_zadarma_audio(self, st) -> None:
         prev = self.zadarma_audio
         self.zadarma_audio = st
-        if prev is None or (prev.available, prev.mic_active, prev.out_active) != (st.available, st.mic_active,
-                                                                                   st.out_active):
-            log.info("zadarma audio: available=%s mic=%s out=%s", st.available, st.mic_active, st.out_active)
+        if prev is None or (prev.available, prev.mic_active, prev.out_active, prev.out_found) != (
+                st.available, st.mic_active, st.out_active, st.out_found):
+            log.info("zadarma audio: available=%s mic=%s (%s) out=%s (%s) metered=%s", st.available,
+                     st.mic_active, st.mic_device or "-", st.out_active, st.out_device or "-", st.out_found)
+        self._follow_zadarma_devices(st)
+
+    def _auto_device(self, key: str) -> bool:
+        """True unless the operator picked this device by hand (menu or config.toml)."""
+        return not (self.qs.value(key, "") or getattr(self.cfg, key))
+
+    def _follow_zadarma_devices(self, st) -> None:
+        """Capture exactly where Zadarma plays and records the call.
+
+        Windows often has the headset as the "communications" device and the speakers as the
+        default output; Zadarma uses the former, so the default loopback would hear nothing.
+        """
+        if not st.mic_active or not hasattr(self.audio, "restart"):
+            return  # decide during a call only, when Zadarma's streams point at the real devices
+        change = {}
+        cur_line = getattr(getattr(self.audio, "line_device", None), "name", "") or ""
+        cur_mic = getattr(getattr(self.audio, "mic_device", None), "name", "") or ""
+        if st.out_device and self._auto_device("line_device") and st.out_device.lower() not in cur_line.lower():
+            change["line_name"] = st.out_device
+        if st.mic_device and self._auto_device("mic_device") and st.mic_device.lower() not in cur_mic.lower():
+            change["mic_name"] = st.mic_device
+        if not change or change == getattr(self, "_last_follow", None):
+            return
+        self._last_follow = change  # don't retry the same switch every 100 ms if the device can't open
+        log.info("following Zadarma's devices: %s", change)
+        try:
+            self.audio.restart(**change)
+            self.overlay.clear_error("no_audio")
+        except Exception as e:
+            log.exception("switching to Zadarma's device failed")
+            self.overlay.show_error("no_audio", str(e)[:40])
 
     def _on_zadarma(self, running) -> None:
         self.zadarma_ok = running
@@ -193,7 +236,7 @@ class DialerApp(QObject):
 
     def open_connection_settings(self, reason: str = "") -> bool:
         before = (self.cfg.gemini_api_key, self.cfg.gemini_model)
-        if not ask_settings(self.cfg, reason):
+        if not ask_settings(self.cfg, reason, on_check_updates=lambda: self.check_updates(manual=True)):
             return False
         if (self.cfg.gemini_api_key, self.cfg.gemini_model) != before:
             relaunch()  # the built-in backend reads the key and model at startup
@@ -225,6 +268,8 @@ class DialerApp(QObject):
             self.link.connect_now()
         elif kind == "no_llm":
             self.open_connection_settings()
+        elif kind == "update":
+            self.install_update()
         elif kind in ("loading", "local_failed"):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(_log_dir() / "dialer.log")))
         elif kind == "no_zadarma":
@@ -248,9 +293,15 @@ class DialerApp(QObject):
             sub = menu.addMenu(title)
             cur = getattr(self.audio, f"{key.split('_')[0]}_device", None)
             group = QActionGroup(sub)
+            auto = QAction("Automatycznie (to samo co Zadarma)", sub, checkable=True)
+            auto.setChecked(self._auto_device(key))
+            auto.triggered.connect(lambda _=False, k=key: self._set_auto_device(k))
+            group.addAction(auto)
+            sub.addAction(auto)
+            sub.addSeparator()
             for d in devs:
                 a = QAction(d.name.replace(" [Loopback]", ""), sub, checkable=True)
-                a.setChecked(bool(cur and cur.index == d.index))
+                a.setChecked(bool(cur and cur.index == d.index) and not self._auto_device(key))
                 a.triggered.connect(lambda _=False, k=key, n=d.name: self._set_device(k, n))
                 group.addAction(a)
                 sub.addAction(a)
@@ -266,6 +317,8 @@ class DialerApp(QObject):
                 group.addAction(a)
                 sub.addAction(a)
             menu.addAction("Ustawienia (klucz Gemini)…", lambda: self.open_connection_settings())
+            menu.addAction(f"Sprawdź aktualizacje (wersja {updater.version_label()})",
+                           lambda: self.check_updates(manual=True))
             menu.addAction("Pokaż dziennik (log)", lambda: QDesktopServices.openUrl(
                 QUrl.fromLocalFile(str(_log_dir() / "dialer.log"))))
             menu.addSeparator()
@@ -281,6 +334,81 @@ class DialerApp(QObject):
         self.manual_call = True
         self.detector.force(True)
         self._call_started()
+
+    # ---------------------------------------------------------------- updates
+    def check_updates(self, manual: bool = True) -> None:
+        if not updater.can_self_update():
+            if manual:
+                self._notify("Aktualizacje działają w wersji .exe pobranej z GitHub.")
+            return
+
+        def work():
+            try:
+                self.bridge.update.emit("checked", (updater.fetch_release(), manual))
+            except Exception as e:
+                log.warning("update check failed: %s", e)
+                self.bridge.update.emit("check_failed", (str(e), manual))
+
+        threading.Thread(target=work, name="update-check", daemon=True).start()
+
+    def install_update(self) -> None:
+        if self._updating or self._release is None:
+            return
+        if self.detector.in_call:
+            self.overlay.show_error("update", "po zakończeniu rozmowy")
+            return
+        self._updating = True
+        rel = self._release
+        self.overlay.show_error("update", "pobieranie 0%")
+
+        def work():
+            try:
+                new = updater.download(rel, lambda f: self.bridge.update.emit("progress", f))
+                self.bridge.update.emit("downloaded", new)
+            except Exception as e:
+                log.exception("update download failed")
+                self.bridge.update.emit("failed", str(e))
+
+        threading.Thread(target=work, name="update-download", daemon=True).start()
+
+    def _on_update_event(self, event: str, payload) -> None:
+        if event == "checked":
+            rel, manual = payload
+            log.info("latest release %s, this build %s", rel.commit[:7], updater.BUILD[:7])
+            if rel.newer:
+                self._release = rel
+                self.overlay.show_error("update", rel.published[:10])
+            elif manual:
+                self._notify(f"Masz najnowszą wersję ({updater.version_label()}).")
+        elif event == "check_failed":
+            if payload[1]:
+                self._notify(f"Nie udało się sprawdzić aktualizacji: {payload[0][:80]}")
+        elif event == "progress":
+            self.overlay.show_error("update", f"pobieranie {int(payload * 100)}%")
+        elif event == "downloaded":
+            try:
+                updater.install(payload)
+            except Exception as e:
+                log.exception("update install failed")
+                self._updating = False
+                self.overlay.show_error("update", "błąd instalacji")
+                self._notify(f"Nie udało się zainstalować aktualizacji: {e}")
+                return
+            log.info("update installed, restarting")
+            relaunch()
+        elif event == "failed":
+            self._updating = False
+            self.overlay.show_error("update", "błąd pobierania")
+            self._notify(f"Nie udało się pobrać aktualizacji: {str(payload)[:80]}")
+
+    def _notify(self, text: str) -> None:
+        self.tray.showMessage("EMANAGER Dialer", text, QSystemTrayIcon.MessageIcon.Information, 5000)
+
+    def _set_auto_device(self, key: str) -> None:
+        self.qs.setValue(key, "")
+        self._last_follow = None
+        if self.zadarma_audio is not None:
+            self._follow_zadarma_devices(self.zadarma_audio)
 
     def _set_device(self, key: str, name: str) -> None:
         self.qs.setValue(key, name)
@@ -316,9 +444,9 @@ class DialerApp(QObject):
 _lock: QLockFile | None = None
 
 
-def ask_settings(cfg: Config, reason: str = "") -> bool:
+def ask_settings(cfg: Config, reason: str = "", on_check_updates=None) -> bool:
     """Settings window; on OK updates cfg and config.toml."""
-    dlg = SettingsDialog(cfg, reason)
+    dlg = SettingsDialog(cfg, reason, on_check_updates=on_check_updates)
     if dlg.exec() != QDialog.DialogCode.Accepted:
         return False
     vals = dlg.values()
@@ -388,6 +516,8 @@ def main() -> int:
                                 "EMANAGER Dialer już działa. Jego ikona jest w zasobniku systemowym obok zegara.")
         return 0
 
+    updater.cleanup()
+    log.info("version %s", updater.version_label())
     cfg = load_config()
     if needs_setup(cfg):
         ask_settings(cfg)
