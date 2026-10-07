@@ -1,4 +1,4 @@
-"""Settings window: Gemini API key and model.
+"""Settings window: Gemini API key and model, and the optional knowledge-base database.
 
 Shown on first run (no key yet) and from the menus, so nobody has to edit config.toml by
 hand. The key is checked with one small Gemini request before saving.
@@ -82,6 +82,19 @@ class SettingsDialog(QDialog):
         how.setStyleSheet(f"color:{T.MUTED};")
         root.addWidget(how)
 
+        db_title = QLabel("Baza wiedzy (Supabase, opcjonalnie)")
+        db_title.setFont(T.sans(13, 700))
+        root.addWidget(db_title)
+        self.db_edit = QLineEdit(cfg.database_url)
+        self.db_edit.setPlaceholderText("postgresql://postgres.…:hasło@…pooler.supabase.com:6543/postgres")
+        self.db_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        root.addWidget(self.db_edit)
+        db_how = QLabel("Supabase → Connect → Transaction pooler → URI (z hasłem). Puste = podpowiedzi bez bazy "
+                        "wiedzy i bez zapisu rozmów.")
+        db_how.setWordWrap(True)
+        db_how.setStyleSheet(f"color:{T.MUTED};")
+        root.addWidget(db_how)
+
         self.status = QLabel("")
         self.status.setWordWrap(True)
         root.addWidget(self.status)
@@ -124,8 +137,13 @@ class SettingsDialog(QDialog):
     def gemini_model(self) -> str:
         return self.model_box.currentText().strip() or GEMINI_MODELS[0]
 
+    @property
+    def database_url(self) -> str:
+        return self.db_edit.text().strip().strip("\"'")
+
     def values(self) -> dict:
-        return {"gemini_api_key": self.gemini_api_key, "gemini_model": self.gemini_model}
+        return {"gemini_api_key": self.gemini_api_key, "gemini_model": self.gemini_model,
+                "database_url": self.database_url}
 
     # ---------------------------------------------------------------- check
     def _check(self) -> None:
