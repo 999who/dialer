@@ -33,7 +33,11 @@ jobs:
 
       - name: Build EmanagerDialer.exe
         working-directory: client
-        run: pyinstaller -y EmanagerDialer.spec
+        shell: bash
+        run: |
+          # the commit this exe is built from; the in-app updater compares it with the release
+          echo "BUILD = \"$GITHUB_SHA\"" > dialer_client/_build.py
+          pyinstaller -y EmanagerDialer.spec
 
       - name: Self-test (built-in backend inside the exe)
         working-directory: client

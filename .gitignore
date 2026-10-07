@@ -6,3 +6,4 @@ __pycache__/
 client/config.toml
 client/build/
 client/dist/
+client/dialer_client/_build.py

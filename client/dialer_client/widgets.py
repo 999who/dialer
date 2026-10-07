@@ -272,7 +272,7 @@ class HintCard(Card):
 
 
 # ------------------------------------------------------------------ errors
-INFO_KINDS = {"loading"}  # not an error: shown in the accent colour
+INFO_KINDS = {"loading", "update"}  # not an error: shown in the accent colour
 
 ERRORS = {
     "server": ("PODPOWIEDZI CHWILOWO NIEDOSTĘPNE",
@@ -281,6 +281,9 @@ ERRORS = {
     "no_llm": ("PODPOWIEDZI NIEDOSTĘPNE",
                "Gemini odrzuca zapytania. Transkrypcja działa, ale podpowiedzi nie będą się pojawiać. "
                "Sprawdź klucz Gemini API w ustawieniach.", "Ustawienia"),
+    "update": ("DOSTĘPNA NOWA WERSJA",
+               "Pobierz i zainstaluj nową wersję EMANAGER Dialer. Aplikacja uruchomi się ponownie "
+               "(kilka sekund).", "Zaktualizuj"),
     "loading": ("PRZYGOTOWANIE ROZPOZNAWANIA MOWY",
                 "Pierwsze uruchomienie pobiera model rozpoznawania mowy (~670 MB), to może potrwać kilka "
                 "minut. Kolejne starty zajmują kilkanaście sekund.", "Pokaż dziennik"),

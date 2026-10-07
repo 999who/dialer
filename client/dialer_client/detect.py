@@ -45,7 +45,10 @@ class CallDetector:
         by_zadarma = zadarma is not None and zadarma.available
         can_start = True
         if by_zadarma:
-            line_v = zadarma.out_peak > ZADARMA_VOICE_PEAK
+            if getattr(zadarma, "out_found", True):  # Zadarma's own playback meter
+                line_v = zadarma.out_peak > ZADARMA_VOICE_PEAK
+            # else: its playback isn't visible (e.g. played by a helper process): keep the loopback
+            # level, the microphone check below still keeps YouTube & co. from starting a call
             if zadarma.mic_active or zadarma.out_active:
                 self._stream_on = now
             # a ringtone plays without the microphone; a conversation needs it

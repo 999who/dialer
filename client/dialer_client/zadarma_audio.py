@@ -34,18 +34,60 @@ class ZadarmaAudio:
     mic_active: bool = False
     out_active: bool = False
     out_peak: float = 0.0     # 0..1, Zadarma's own output only
+    out_found: bool = False   # Zadarma has a playback session we can meter
+    # names of the devices Zadarma actually uses for the call (often the headset, set as the
+    # Windows "communications" device, while the default output is the speakers)
+    out_device: str = ""
+    mic_device: str = ""
 
 
-def read_zadarma_audio(_names: dict[int, str] = {}) -> ZadarmaAudio:  # noqa: B006 - pid -> name cache
+def _is_zadarma(pid: int, cache: dict[int, bool]) -> bool:
+    """Zadarma itself or a helper process it started (an Electron/Chromium softphone plays
+    sound from a child process that may carry a different name)."""
+    hit = cache.get(pid)
+    if hit is None:
+        import psutil
+
+        hit = False
+        try:
+            p = psutil.Process(pid)
+            for _ in range(4):
+                if p is None:
+                    break
+                if PROCESS_MATCH in p.name().lower():
+                    hit = True
+                    break
+                p = p.parent()
+        except Exception:
+            pass
+        cache[pid] = hit
+    return hit
+
+
+def _device_name(dev, cache: dict[str, str]) -> str:
+    dev_id = dev.GetId()
+    name = cache.get(dev_id)
+    if name is None:
+        try:
+            from pycaw.utils import AudioUtilities
+
+            name = AudioUtilities.CreateDevice(dev).FriendlyName or ""
+        except Exception:
+            name = ""
+        cache[dev_id] = name
+    return name
+
+
+def read_zadarma_audio(_procs: dict[int, bool] = {}, _devs: dict[str, str] = {}) -> ZadarmaAudio:  # noqa: B006
     """One snapshot of Zadarma's sessions on every active playback and recording device."""
     import comtypes
-    import psutil
     from pycaw.api.audiopolicy import IAudioSessionControl2, IAudioSessionManager2
     from pycaw.api.endpointvolume import IAudioMeterInformation
     from pycaw.api.mmdeviceapi import IMMDeviceEnumerator
     from pycaw.constants import CLSID_MMDeviceEnumerator
 
     st = ZadarmaAudio(available=True)
+    best_out = -1.0
     enum = comtypes.CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, comtypes.CLSCTX_INPROC_SERVER)
     for flow in (E_RENDER, E_CAPTURE):
         devices = enum.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE)
@@ -62,24 +104,23 @@ def read_zadarma_audio(_names: dict[int, str] = {}) -> ZadarmaAudio:  # noqa: B0
                     pid = ctl.QueryInterface(IAudioSessionControl2).GetProcessId()
                     if not pid:
                         continue  # system sounds session
-                    name = _names.get(pid)
-                    if name is None:
-                        try:
-                            name = psutil.Process(pid).name().lower()
-                        except Exception:
-                            name = ""
-                        _names[pid] = name
-                    if PROCESS_MATCH not in name:
+                    if not _is_zadarma(pid, _procs):
                         continue
                     st.found = True
                     active = ctl.GetState() == SESSION_ACTIVE
                     if flow == E_CAPTURE:
                         st.mic_active |= active
+                        if active and not st.mic_device:
+                            st.mic_device = _device_name(dev, _devs)
                     else:
+                        st.out_found = True
                         st.out_active |= active
                         if active:
-                            peak = ctl.QueryInterface(IAudioMeterInformation).GetPeakValue()
-                            st.out_peak = max(st.out_peak, float(peak))
+                            peak = float(ctl.QueryInterface(IAudioMeterInformation).GetPeakValue())
+                            st.out_peak = max(st.out_peak, peak)
+                            if peak > best_out:  # loudest device = where the call is heard
+                                best_out = peak
+                                st.out_device = _device_name(dev, _devs)
             except Exception as e:  # a device unplugged mid-scan etc.
                 log.debug("session scan failed on a device: %s", e)
     return st
@@ -102,8 +143,8 @@ class ZadarmaAudioWatcher(threading.Thread):
 
     def gate_open(self) -> bool:
         st = self.state
-        if not st.available or not st.found:
-            return True
+        if not st.available or not st.out_found:
+            return True  # can't meter Zadarma's playback: never mute the client
         return time.monotonic() - self._last_sound <= self.hold_s
 
     def stop(self) -> None:
