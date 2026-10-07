@@ -290,6 +290,9 @@ ERRORS = {
     "local_failed": ("NIE UDAŁO SIĘ URUCHOMIĆ PODPOWIEDZI",
                      "Rozpoznawanie mowy nie wystartowało. Przy pierwszym uruchomieniu potrzebny jest internet "
                      "do pobrania modelu. Szczegóły są w dzienniku.", "Pokaż dziennik"),
+    "no_rag": ("BAZA WIEDZY NIEDOSTĘPNA",
+               "Nie udało się połączyć z bazą (database_url). Transkrypcja i podpowiedzi działają, "
+               "ale bez bazy wiedzy i bez zapisu rozmów.", "Pokaż dziennik"),
     "no_line": ("NIE SŁYCHAĆ LINII",
                 "Dźwięk rozmówcy nie dociera. Sprawdź, czy Zadarma wysyła dźwięk na wybrane urządzenie.",
                 "Wybierz urządzenie"),

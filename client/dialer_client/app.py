@@ -283,6 +283,10 @@ class DialerApp(QObject):
                 self.overlay.show_error("no_llm", str(m["llm_error"])[:40])
             else:
                 self.overlay.clear_error("no_llm")
+            if m.get("rag_error"):
+                self.overlay.show_error("no_rag", str(m["rag_error"])[:40])
+            else:
+                self.overlay.clear_error("no_rag")
         elif t == "transcript":
             self.transcript.append((m.get("t", 0), m["speaker"], m["text"]))
             if self.detector.in_call:  # last words of an ended call go to its summary only
@@ -305,7 +309,7 @@ class DialerApp(QObject):
             self.open_connection_settings()
         elif kind == "update":
             self.install_update()
-        elif kind in ("loading", "local_failed"):
+        elif kind in ("loading", "local_failed", "no_rag"):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(_log_dir() / "dialer.log")))
         elif kind == "no_zadarma":
             self.watcher.kick.set()
