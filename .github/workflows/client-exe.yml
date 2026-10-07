@@ -44,8 +44,14 @@ jobs:
         shell: pwsh
         run: |
           $p = Start-Process dist\EmanagerDialer.exe -ArgumentList "--selftest" -PassThru -Wait
-          Get-Content "$env:LOCALAPPDATA\EMANAGER\EMANAGER Dialer\dialer.log" -ErrorAction SilentlyContinue | Select-Object -Last 40
-          if ($p.ExitCode -ne 0) { throw "selftest failed with code $($p.ExitCode)" }
+          $tail = Get-Content "$env:LOCALAPPDATA\EMANAGER\EMANAGER Dialer\dialer.log" -ErrorAction SilentlyContinue | Select-Object -Last 40
+          $tail
+          if ($p.ExitCode -ne 0) {
+            # annotations are readable through the checks API even where the raw log is not
+            $msg = (($tail | Select-Object -Last 15) -join '%0A')
+            Write-Output "::error title=selftest log::$msg"
+            throw "selftest failed with code $($p.ExitCode)"
+          }
 
       - name: Smoke test (demo mode starts and keeps running)
         working-directory: client

@@ -49,10 +49,16 @@ def main() -> int:
 
         _SileroVAD().prob(__import__("numpy").zeros(512, dtype="float32"))
         assert PROMPT.exists(), f"missing {PROMPT}"
+        import urllib.error
+
         from . import updater
 
-        rel = updater.fetch_release()  # the update check works inside the exe (https, JSON)
-        log.info("release %s, %d bytes", rel.commit[:7], rel.size)
+        "api.github.com".encode("idna")  # urllib needs this codec for https host names
+        try:  # the update check works inside the exe (https, certificates, JSON)
+            rel = updater.fetch_release()
+            log.info("release %s, %d bytes", rel.commit[:7], rel.size)
+        except urllib.error.HTTPError as e:  # GitHub answered (e.g. rate limit on shared CI runners)
+            log.warning("release check answered %s, not a build problem", e.code)
         log.info("SELFTEST OK")
         srv.stop()
         return 0
