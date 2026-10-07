@@ -314,6 +314,9 @@ class ErrorCard(Card):
         row, _, self.note = header_row(title, T.ACCENT if info else T.ERROR, note, icon="alert")
         self.body.addLayout(row)
         self.body.addWidget(text(body, T.serif(18), T.TEXT_STRONG, wrap=True))
+        self.bar = ProgressLine()
+        self.bar.hide()
+        self.body.addWidget(self.bar)
         actions = QHBoxLayout()
         actions.setSpacing(6)
         actions.setContentsMargins(0, 4, 0, 0)
@@ -328,6 +331,34 @@ class ErrorCard(Card):
 
     def set_note(self, note: str) -> None:
         self.note.setText(note)
+
+    def set_progress(self, fraction: float | None) -> None:
+        """A thin bar under the text (e.g. the model download); None hides it."""
+        self.bar.setVisible(fraction is not None)
+        if fraction is not None:
+            self.bar.set_value(fraction)
+
+
+class ProgressLine(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.value = 0.0
+        self.setFixedHeight(6)
+
+    def set_value(self, v: float) -> None:
+        self.value = max(0.0, min(1.0, v))
+        self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        r = QRectF(self.rect())
+        p.setBrush(QColor(T.BORDER_SOFT))
+        p.drawRoundedRect(r, 3, 3)
+        if self.value > 0:
+            p.setBrush(QColor(T.ACCENT))
+            p.drawRoundedRect(QRectF(r.x(), r.y(), max(6.0, r.width() * self.value), r.height()), 3, 3)
 
 
 # ------------------------------------------------------------------ call summary

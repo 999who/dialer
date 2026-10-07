@@ -218,6 +218,12 @@ class Overlay(QWidget):
         self.errors[kind] = card
         self._push(card)
 
+    def set_error_progress(self, kind: str, fraction: float | None, note: str = "") -> None:
+        card = self.errors.get(kind)
+        if card:
+            card.set_note(note)
+            card.set_progress(fraction)
+
     def clear_error(self, kind: str) -> None:
         self.dismissed_errors.discard(kind)
         card = self.errors.pop(kind, None)
