@@ -406,6 +406,7 @@ class StatusBar(Card):
     """'Aplikacja · zwinięta': 400 × 56. States: call / waiting / offline."""
 
     pause_toggled = pyqtSignal(bool)
+    stop = pyqtSignal()
     expand = pyqtSignal()
     settings = pyqtSignal()
 
@@ -480,10 +481,14 @@ class StatusBar(Card):
         bs = 40 if in_panel else 38
         br = bs // 2 if in_panel else 11
         self.pause_btn = button(icon="pause", bg="#23262C" if in_panel else T.BUTTON_BG, fg=T.TEXT, w=bs, h=bs,
-                                radius=br, icon_size=13, tip="Wstrzymaj podpowiedzi")
+                                radius=br, icon_size=13, tip="Wstrzymaj słuchanie i podpowiedzi (rozmowa trwa dalej)")
         self.pause_btn.setCheckable(True)
         self.pause_btn.toggled.connect(self._on_pause)
         row.addWidget(self.pause_btn)
+        self.stop_btn = button(icon="stop", bg="#23262C" if in_panel else T.BUTTON_BG, fg=T.ERROR, w=bs, h=bs,
+                               radius=br, icon_size=12, tip="Zakończ rozmowę i wyczyść ekran")
+        self.stop_btn.clicked.connect(self.stop.emit)
+        row.addWidget(self.stop_btn)
         self.expand_btn = button(icon="collapse" if in_panel else "expand", bg=T.TEXT_STRONG, fg=T.BG, w=bs, h=bs,
                                  radius=br, icon_size=16 if in_panel else 15,
                                  tip="Zwiń do panelu" if in_panel else "Rozwiń aplikację")
@@ -493,7 +498,9 @@ class StatusBar(Card):
 
     def _on_pause(self, paused: bool) -> None:
         set_button_fg(self.pause_btn, "play" if paused else "pause", T.TEXT, 13)
-        self.pause_btn.setToolTip("Wznów podpowiedzi" if paused else "Wstrzymaj podpowiedzi")
+        self.pause_btn.setToolTip("Wznów słuchanie i podpowiedzi" if paused else
+                                  "Wstrzymaj słuchanie i podpowiedzi (rozmowa trwa dalej)")
+        self.set_state(self.state)
         self.pause_toggled.emit(paused)
 
     def set_paused(self, paused: bool) -> None:
@@ -507,7 +514,11 @@ class StatusBar(Card):
         self.dot.set_color(T.BRAND if in_call else T.MUTED, halo=in_call)
         self.timer_lbl.setVisible(in_call)
         self.meters.setVisible(in_call)
-        self.status_lbl.setVisible(state == "waiting")
+        paused = in_call and self.pause_btn.isChecked()
+        self.status_lbl.setVisible(state == "waiting" or paused)
+        self.status_lbl.setText("wstrzymano" if paused else "Oczekiwanie na rozmowę")
+        self.meters.setVisible(in_call and not paused)
+        self.stop_btn.setVisible(in_call)
         self.offline.setVisible(state.startswith("offline") and not self.in_panel)
         self.latency.setVisible(state == "call" and not self.in_panel)
         if state == "offline":

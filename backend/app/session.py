@@ -23,7 +23,7 @@ from .rag_store import KBMatch
 
 log = logging.getLogger("session")
 
-ROLE_LABEL = {"operator": "Operator", "client": "Klient"}
+ROLE_LABEL = {"operator": "Konsultant", "client": "Klient"}
 FILLERS = {"tak", "nie", "aha", "mhm", "okej", "ok", "dobrze", "no", "yhm", "jasne", "rozumiem", "dziękuję",
            "halo", "dzień", "dobry", "słucham"}
 QUESTION_WORDS = ("ile", "jak", "czy", "kiedy", "gdzie", "dlaczego", "co ", "jaki", "jaka", "jakie", "kto")

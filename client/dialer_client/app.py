@@ -51,6 +51,7 @@ class DialerApp(QObject):
         self.zadarma_ok: bool | None = None
         self.zadarma_audio = None  # latest ZadarmaAudio snapshot
         self.manual_call = False
+        self._manual_zadarma_idle = False
 
         self.bridge.frame.connect(self._on_frame)
         self.bridge.zadarma.connect(self._on_zadarma)
@@ -65,6 +66,7 @@ class DialerApp(QObject):
         ov.hint_copied.connect(lambda hid: self.link.send({"type": "feedback", "hint_id": hid, "copied": True}))
         ov.hint_feedback.connect(lambda hid, u: self.link.send({"type": "feedback", "hint_id": hid, "useful": u}))
         ov.pause_toggled.connect(self.link.set_paused)
+        ov.stop_requested.connect(self.end_call_by_hand)
         ov.error_action.connect(self._on_error_action)
         ov.settings_requested.connect(self._settings_menu)
         ov.save_crm.connect(self._save_crm)
@@ -130,6 +132,15 @@ class DialerApp(QObject):
     # ---------------------------------------------------------------- audio / call
     def _on_frame(self, frame: bytes, mic: float, line: float) -> None:
         self.overlay.set_levels(mic, line)
+        if self.manual_call and self.cfg.call_detect == "zadarma" and self.zadarma_audio is not None:
+            if not self.zadarma_audio.mic_active:
+                self._manual_zadarma_idle = True
+            elif self._manual_zadarma_idle:
+                # a real Zadarma call began during a call started by hand: that one ends here,
+                # and the Zadarma call starts fresh and will also end on its own
+                log.info("Zadarma call during a manual call: switching to it")
+                self.detector.force(False)
+                self._call_ended()
         z = self.zadarma_audio if (self.cfg.call_detect == "zadarma" and not self.manual_call) else None
         ev = self.detector.update(mic, line, zadarma=z)
         if ev == "start" and self.cfg.require_zadarma and self.zadarma_ok is False:
@@ -151,7 +162,8 @@ class DialerApp(QObject):
     def _call_started(self) -> None:
         log.info("call started")
         self.transcript.clear()
-        self.overlay.clear_transcript()
+        self.overlay.clear_screen()  # nothing from the previous call stays on screen
+        self.overlay.set_paused(False)  # pause is for one call only
         self.link.call_start("")
         for f in self.preroll:
             self.link.send_audio(f)
@@ -162,8 +174,18 @@ class DialerApp(QObject):
         log.info("call ended")
         self.manual_call = False
         self.link.call_end()
+        self.overlay.set_paused(False)
         self.overlay.set_call(False)
+        self.overlay.clear_transcript()  # the summary card keeps it ("Otwórz transkrypcję")
         self.overlay.clear_error("no_line")
+
+    def end_call_by_hand(self) -> None:
+        """Stop button / menu: ends the call now and clears the screen."""
+        if self.detector.in_call:
+            self.detector.force(False)
+            self._call_ended()
+        else:
+            self.overlay.clear_screen()
 
     def _on_clock(self) -> None:
         if self.detector.in_call:
@@ -263,7 +285,8 @@ class DialerApp(QObject):
                 self.overlay.clear_error("no_llm")
         elif t == "transcript":
             self.transcript.append((m.get("t", 0), m["speaker"], m["text"]))
-            self.overlay.add_transcript(m.get("t", 0), m["speaker"], m["text"])
+            if self.detector.in_call:  # last words of an ended call go to its summary only
+                self.overlay.add_transcript(m.get("t", 0), m["speaker"], m["text"])
         elif t == "hint":
             self.overlay.show_hint(m)
         elif t == "latency":
@@ -335,15 +358,17 @@ class DialerApp(QObject):
                 QUrl.fromLocalFile(str(_log_dir() / "dialer.log"))))
             menu.addSeparator()
             if self.detector.in_call:
-                menu.addAction("Zakończ rozmowę", lambda: (self.detector.force(False), self._call_ended()))
+                menu.addAction("Zakończ rozmowę", self.end_call_by_hand)
             else:
                 menu.addAction("Rozpocznij rozmowę ręcznie", self._manual_start)
+                menu.addAction("Wyczyść ekran", self.overlay.clear_screen)
             menu.addSeparator()
             menu.addAction("Zamknij EMANAGER Dialer", QApplication.quit)
         menu.exec(pos)
 
     def _manual_start(self) -> None:
         self.manual_call = True
+        self._manual_zadarma_idle = False  # switch to Zadarma only on a call that starts after this
         self.detector.force(True)
         self._call_started()
 

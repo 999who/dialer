@@ -45,6 +45,7 @@ class Overlay(QWidget):
     hint_feedback = pyqtSignal(str, bool)
     error_action = pyqtSignal(str)
     pause_toggled = pyqtSignal(bool)
+    stop_requested = pyqtSignal()
     settings_requested = pyqtSignal(QPoint)
     save_crm = pyqtSignal(dict)
     open_transcript = pyqtSignal(dict)
@@ -65,6 +66,7 @@ class Overlay(QWidget):
         self.hint_seconds = hint_seconds
         self.summary_seconds = summary_seconds
         self.expanded = False
+        self.paused = False
         self.errors: dict[str, ErrorCard] = {}
         self.cards: list[Card] = []  # newest last
         self.dismissed_errors: set[str] = set()
@@ -87,6 +89,8 @@ class Overlay(QWidget):
         self.panel.minimize.connect(self.showMinimized)
         self.bar.pause_toggled.connect(self._pause)
         self.panel.bar.pause_toggled.connect(self._pause)
+        self.bar.stop.connect(self.stop_requested.emit)
+        self.panel.bar.stop.connect(self.stop_requested.emit)
         self.bar.settings.connect(lambda: self.settings_requested.emit(self.bar.mapToGlobal(QPoint(0, 0))))
         self.panel.settings.connect(lambda: self.settings_requested.emit(self.panel.mapToGlobal(QPoint(300, 50))))
         self.panel.pin_toggled.connect(self._pin)
@@ -155,7 +159,20 @@ class Overlay(QWidget):
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on)
         self.show()
 
+    def set_paused(self, paused: bool) -> None:
+        self._pause(paused)
+
+    def clear_screen(self) -> None:
+        """Transcript, hints and summaries go; errors stay (they describe the current state)."""
+        self.clear_transcript()
+        self.panel.set_hint(None)
+        for c in [c for c in self.cards if not isinstance(c, ErrorCard)]:
+            self._remove(c)
+
     def _pause(self, paused: bool) -> None:
+        if paused == self.paused:
+            return  # the other bar echoing the same change
+        self.paused = paused
         self.bar.set_paused(paused)
         self.panel.bar.set_paused(paused)
         self.pause_toggled.emit(paused)

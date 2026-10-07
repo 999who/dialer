@@ -233,3 +233,32 @@ def test_model_already_downloaded_shows_no_progress(tmp_path):
     dl = DownloadProgress(tmp_path, fetch_total=False)
     dl.total = 10_000
     assert dl.status() is None  # nothing new arrives: only loading from disk
+
+
+def test_stop_and_pause_buttons_and_clearing_between_calls():
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+
+    from dialer_client.overlay import Overlay
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    ov = Overlay()
+    stops, pauses = [], []
+    ov.stop_requested.connect(lambda: stops.append(1))
+    ov.pause_toggled.connect(pauses.append)
+    ov.set_call(True, 5)
+    assert not ov.bar.stop_btn.isHidden()
+    ov.bar.pause_btn.click()
+    assert pauses == [True] and ov.bar.status_lbl.text() == "wstrzymano" and ov.bar.meters.isHidden()
+    ov.set_paused(False)
+    assert pauses == [True, False] and ov.bar.status_lbl.isHidden()
+    ov.bar.stop_btn.click()
+    assert stops == [1]
+    ov.add_transcript(1, "client", "Dzień dobry")
+    ov.show_summary({"duration_s": 10, "summary": "x"})
+    ov.clear_screen()
+    assert not ov.panel.transcript.rows and not ov.cards
+    ov.set_call(False)
+    assert ov.bar.stop_btn.isHidden()
