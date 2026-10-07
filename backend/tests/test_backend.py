@@ -187,3 +187,16 @@ def test_websocket_text_mode(monkeypatch):
             ws.send_text(json.dumps({"type": "call_end"}))
             assert ws.receive_json()["type"] == "call_summary"
     config.get_settings.cache_clear()
+
+
+def test_new_prompt_without_rag_slot_gets_no_literal_placeholders_and_kb_matches():
+    from app.llm import MasterPrompt
+
+    p = MasterPrompt.load(ROOT.parent / "prompts" / "master_prompt_pl.md")
+    static, dyn = p.render("[1] Sklep od 5000 zł", "(brak)", "[Klient]: Ile kosztuje sklep?")
+    assert "# ROLA" in static and "{caller_name}" not in dyn and "brak danych" in dyn
+    assert "[Klient]: Ile kosztuje sklep?" in dyn
+    if "{rag_context}" not in p.dynamic:
+        assert "Sklep od 5000 zł" in dyn
+    _, dyn = p.render("(brak dopasowań w bazie wiedzy)", "(brak)", "x")
+    assert "FRAGMENTY BAZY WIEDZY" not in dyn

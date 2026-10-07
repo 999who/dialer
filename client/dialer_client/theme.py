@@ -109,6 +109,8 @@ SVG = {
                   'height="6" rx="1.5"/><rect x="17" y="15" width="4" height="6" rx="1.5"/></svg>',
     "pause": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" '
              'width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>',
+    "stop": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">'
+            '<rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
     "play": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">'
             '<path d="M7 4.5v15a1 1 0 0 0 1.5.9l12-7.5a1 1 0 0 0 0-1.8l-12-7.5A1 1 0 0 0 7 4.5z"/></svg>',
     "collapse": f'<svg {_S} stroke-width="2.4"><path d="M4 14h6v6"/><path d="M20 10h-6V4"/><path d="M14 10l7-7"/>'

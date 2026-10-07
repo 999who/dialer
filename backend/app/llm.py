@@ -24,6 +24,8 @@ log = logging.getLogger("llm")
 PLACEHOLDERS = ("{rag_context}", "{last_hint}", "{transcript_history}")
 CATEGORIES = {"info", "objection", "script", "warning"}
 SILENT = {"show": False, "category": "", "hint": ""}
+UNKNOWN_PLACEHOLDER = re.compile(r"\{[a-z][a-z0-9_]*\}")
+NO_DATA = "brak danych"
 
 
 class MasterPrompt:
@@ -47,9 +49,15 @@ class MasterPrompt:
         return cls(path.read_text(encoding="utf-8"))
 
     def render(self, rag_context: str, last_hint: str, transcript_history: str) -> tuple[str, str]:
-        dyn = (self.dynamic.replace("{rag_context}", rag_context)
+        # placeholders the app has no data for (e.g. caller ID / CRM fields) must not reach
+        # the model as literal "{caller_name}"
+        dyn = UNKNOWN_PLACEHOLDER.sub(lambda m: m[0] if m[0] in PLACEHOLDERS else NO_DATA, self.dynamic)
+        dyn = (dyn.replace("{rag_context}", rag_context)
                .replace("{last_hint}", last_hint)
                .replace("{transcript_history}", transcript_history))
+        if "{rag_context}" not in self.dynamic and rag_context and not rag_context.startswith("("):
+            # the prompt has no slot for the knowledge base, but matches were found: still pass them
+            dyn += f"\n\n[FRAGMENTY BAZY WIEDZY EMANAGER.PRO]:\n{rag_context}"
         if self.static:
             return self.static, dyn
         return dyn, "Przeanalizuj powyższy kontekst i zwróć JSON."
