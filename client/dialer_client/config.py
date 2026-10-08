@@ -43,6 +43,11 @@ class Config:
     no_line_warning_s: float = 12.0
     require_zadarma: bool = True
     offline_buffer_s: int = 60
+    # EMANAGER CRM (Supabase) for the client card; the operator signs in with their CRM account
+    crm_url: str = ""               # https://<project>.supabase.co
+    crm_key: str = ""               # publishable (anon) key: public by design, access is the operator's
+    crm_sip: str = ""               # Zadarma extension of this PC (e.g. "100"); empty = any
+    own_numbers: str = "609037902, 525275052"  # the company's own numbers: never a client card
 
 
 def needs_setup(cfg: Config) -> bool:

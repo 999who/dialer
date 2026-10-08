@@ -66,10 +66,12 @@ Zwracaj WYŁĄCZNIE poprawny obiekt JSON, bez znaczników markdown ```json i bez
 {
   "show": true | false,
   "category": "warning" | "objection" | "info" | "script" | "",
-  "hint": "Tekst podpowiedzi po polsku (maksymalnie 12 słów)"
+  "hint": "Tekst podpowiedzi po polsku (maksymalnie 12 słów)",
+  "caller": "Kim przedstawił się rozmówca w TEJ rozmowie, np. \"Marek, Bipromasz\", albo \"\""
 }
 
 Gdy `"show": false`, pola `category` i `hint` muszą zawierać puste ciągi znaków `""`.
+Pole `caller` wypełniaj niezależnie od `show`: imię i/lub firmę, które rozmówca sam podał w transkrypcji (nie zgaduj, nie przepisuj z kontekstu CRM). Jeśli się nie przedstawił, zwróć `""`.
 
 ## PRZYKŁADY REAKCJI SYSTEMU
 
@@ -97,13 +99,7 @@ Gdy `"show": false`, pola `category` i `hint` muszą zawierać puste ciągi znak
 # BIEŻĄCY KONTEKST ROZMOWY
 
 [KONTEKST KLIENTA Z BAZY SUPABASE (CALLER ID / BAZA)]:
-- Zidentyfikowany kontakt: {caller_name} ({caller_position})
-- Firma / Klient: {client_name} (NIP: {client_nip})
-- Status relacji: {client_relation_status} (np. Stały klient z umową / Aktywny projekt / Nowy lead)
-- Aktywny pakiet godzin: {client_retainer_hours} h/miesiąc (bilans: {client_hours_balance})
-- Bieżący deal w CRM: {deal_stage} – {deal_title} ({deal_value} zł)
-- Otwarte zgłoszenia / tickety: {open_tickets_summary}
-- Dedykowany opiekun: {account_manager}
+{client_context}
 
 [OSTATNIA WYŚWIETLONA PODPOWIEDŹ]:
 {last_hint}

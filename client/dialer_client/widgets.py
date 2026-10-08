@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import time
+from datetime import date
+from html import escape
 
 from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen
@@ -269,6 +271,300 @@ class HintCard(Card):
         set_button_fg(self.up, "up", T.ACCENT if useful else T.MUTED, 15)
         set_button_fg(self.down, "down", T.ERROR if not useful else T.MUTED, 15)
         self.feedback.emit(self.hint_id, useful)
+
+
+# ------------------------------------------------------------------ client card
+# kind -> badge text, badge colour, tile colour
+CLIENT_KIND = {"subscriber": ("ABONAMENT", T.ACCENT), "client": ("KLIENT", T.ACCENT),
+               "lead": ("LEAD", T.OPERATOR), "contact": ("KONTAKT", T.MUTED2), "unknown": ("NOWY", T.MUTED2)}
+TICKET_STATUS = {"nowe": ("nowe", T.ACCENT), "w_toku": ("w toku", T.OPERATOR),
+                 "czeka_na_klienta": ("czeka na klienta", T.CLIENT), "do_opracowania": ("do opracowania", T.MUTED2)}
+MONTHS = ("Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec", "Lipiec", "Sierpień", "Wrzesień",
+          "Październik", "Listopad", "Grudzień")
+
+
+def _rgba(color: str, alpha: float) -> str:
+    c = QColor(color)
+    return f"rgba({c.red()},{c.green()},{c.blue()},{alpha})"
+
+
+def _hours(h: float) -> str:
+    return (f"{h:.1f}".rstrip("0").rstrip(".") + " h").replace(".", ",")
+
+
+def _ago(iso: str) -> str:
+    try:
+        days = (date.today() - date.fromisoformat(iso[:10])).days
+    except ValueError:
+        return ""
+    return "dziś" if days <= 0 else "wczoraj" if days == 1 else f"{days} dni temu"
+
+
+def _pl_date(iso: str) -> str:
+    try:
+        return date.fromisoformat(iso[:10]).strftime("%d.%m.%Y")
+    except ValueError:
+        return iso
+
+
+def mask_phone(phone: str) -> str:
+    digits = "".join(ch for ch in phone or "" if ch.isdigit())[-9:]
+    return f"+48 {digits[:3]} *** {digits[6:]}" if len(digits) == 9 else ""
+
+
+class HourCells(QWidget):
+    """Retainer hours as a row of cells: 1 cell = 1 h of the package (1/20 above 20 h), lit = left."""
+
+    def __init__(self, limit: float, left: float, color: str, over: bool):
+        super().__init__()
+        self.n = max(1, min(20, int(round(limit))))
+        self.lit = left / (limit / self.n) if limit else 0
+        self.color, self.over = color, over
+        self.setFixedHeight(10)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        gap = 3
+        w = (self.width() - gap * (self.n - 1)) / self.n
+        for i in range(self.n):
+            r = QRectF(i * (w + gap), 0, w, self.height())
+            path = QPainterPath()
+            path.addRoundedRect(r, 3, 3)
+            p.setClipPath(path)
+            p.fillRect(r, QColor(255, 107, 107, 71) if self.over else QColor("#252930"))
+            fill = 0.0 if self.over else max(0.0, min(1.0, self.lit - i))
+            if fill:
+                p.fillRect(QRectF(r.x(), 0, r.width() * fill, r.height()), QColor(self.color))
+        p.setClipping(False)
+
+
+def pill(s: str, fg: str, bg: str, px: int = 10, spacing: float = 8) -> QLabel:
+    lb = QLabel(s)
+    lb.setFont(T.sans(px, 700, spacing))
+    lb.setStyleSheet(f"color:{fg};background:{bg};border-radius:9px;padding:3px 8px;")
+    lb.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    return lb
+
+
+class ClientCard(Card):
+    """Who is calling, straight from the CRM (no AI). Stays next to the bar for the whole call.
+
+    Geist only, no serif: it must not look like an AI hint. Sections show only when there is
+    something to show: hours of the retainer, open tickets, the last call with what was agreed.
+    """
+
+    closed = pyqtSignal()
+
+    def __init__(self, data: dict):
+        super().__init__(bg="#0F1215")
+        self.body.setSpacing(14)
+        self.data = data
+        kind = data.get("kind") or "unknown"
+        if kind == "client" and data.get("subscriber"):
+            kind = "subscriber"
+        badge, color = CLIENT_KIND.get(kind, CLIENT_KIND["unknown"])
+        known = kind != "unknown" or data.get("title") or data.get("person")
+
+        # header: tile, name + contact, badge + source, close
+        head = QHBoxLayout()
+        head.setSpacing(12)
+        name = data.get("title") or data.get("person") or mask_phone(data.get("phone", "")) or "Nieznany rozmówca"
+        contact = data.get("person") if data.get("title") else ("" if known else "Numer spoza CRM")
+        tile = QLabel(name[:1].upper() if known else "?")
+        tile.setFixedSize(40, 40)
+        tile.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tile.setFont(T.sans(16, 700))
+        tile_bg = {"lead": "#1B2433", "contact": "#1F2227", "unknown": "#1F2227"}.get(kind, "#1F2A28")
+        tile.setStyleSheet(f"color:{color if kind not in ('contact', 'unknown') else T.MUTED};"
+                           f"background:{tile_bg};border-radius:12px;")
+        head.addWidget(tile, 0, Qt.AlignmentFlag.AlignVCenter)
+        who = QVBoxLayout()
+        who.setSpacing(1)
+        title = ElidedLabel(name, T.sans(18, 700, -2), T.TEXT_STRONG)
+        title.setToolTip(name)
+        who.addWidget(title)
+        if contact:
+            who.addWidget(ElidedLabel(contact, T.sans(13), T.MUTED2))
+        head.addLayout(who, 1)
+        meta = QVBoxLayout()
+        meta.setSpacing(4)
+        meta.addWidget(pill(badge, color, _rgba(color, 0.13) if kind != "unknown" else "#1F2227"),
+                       0, Qt.AlignmentFlag.AlignRight)
+        src = "po nazwie" if data.get("via") == "name" else "z kontaktów" if kind == "contact" else \
+            "z CRM" if known else ""
+        if src:
+            meta.addWidget(text(src, T.sans(10), T.FAINT), 0, Qt.AlignmentFlag.AlignRight)
+        head.addLayout(meta)
+        close = button(icon="close", fg=T.FAINT, w=28, h=28, radius=8, icon_size=13, tip="Zwiń kartę klienta")
+        close.clicked.connect(self.closed.emit)
+        head.addWidget(close, 0, Qt.AlignmentFlag.AlignTop)
+        self.body.addLayout(head)
+
+        if not known:
+            self.body.addWidget(text("Tego numeru nie ma w bazie. Karta uzupełni się, gdy rozmówca poda nazwę "
+                                     "firmy.", T.sans(14), T.TEXT_SOFT, wrap=True))
+            return
+
+        hours = data.get("hours") or {}
+        if hours.get("limit"):
+            self.body.addWidget(self._hours_box(hours))
+        elif kind == "lead":
+            since = f" · lead od {_pl_date(data['lead_since'])[:5]}" if data.get("lead_since") else ""
+            self.body.addWidget(self._plain_box(f"Bez abonamentu{since}"))
+        elif kind == "subscriber":
+            self.body.addWidget(self._plain_box("Klient abonamentowy · bez limitu godzin"))
+
+        if kind in ("subscriber", "client", "lead"):
+            items = data.get("ticket_items") or []
+            sec = self._section("ZGŁOSZENIA", str(len(items)))
+            for t in items[:3]:
+                row = QHBoxLayout()
+                row.setSpacing(10)
+                num = text(f"#{t['number']}", T.sans(13), T.FAINT)
+                num.setMinimumWidth(26)
+                row.addWidget(num)
+                row.addWidget(ElidedLabel(t["title"], T.sans(13), T.TEXT), 1)
+                label, c = TICKET_STATUS.get(t["status"], (t["status"].replace("_", " "), T.MUTED))
+                row.addWidget(StatusDot(label, c))
+                sec.addLayout(row)
+            if not items:
+                sec.addWidget(text("Brak otwartych zgłoszeń", T.sans(13), T.FAINT))
+            self.body.addLayout(sec)
+
+        deal = (data.get("deals") or [""])[0]
+        if data.get("last_call_at") or data.get("callback") or (deal and kind != "lead"):
+            self.body.addWidget(self._sep())
+        if data.get("last_call_at"):
+            sec = self._section("OSTATNIA ROZMOWA", "", _ago(data["last_call_at"]))
+            line = QLabel(f'<span style="color:{T.MUTED2}">{_pl_date(data["last_call_at"])}</span> · '
+                          f'{escape(data.get("last_call_title") or "")}')
+            line.setFont(T.sans(13))
+            line.setStyleSheet(f"color:{T.TEXT};background:transparent;")
+            line.setWordWrap(True)
+            sec.addWidget(line)
+            for item in data.get("promises") or []:
+                sec.addWidget(Promise(item))
+            self.body.addLayout(sec)
+        if data.get("callback") or (deal and kind != "lead"):
+            sec = self._section("DO ZROBIENIA")
+            if data.get("callback"):
+                sec.addWidget(text(data["callback"], T.sans(13), T.TEXT, wrap=True))
+            if deal and kind != "lead":
+                sec.addWidget(text(f"Szansa sprzedaży: {deal}", T.sans(13), T.TEXT_SOFT, wrap=True))
+            self.body.addLayout(sec)
+
+    @staticmethod
+    def _sep() -> QFrame:
+        f = QFrame()
+        f.setFixedHeight(1)
+        f.setStyleSheet("background:#1F2227;")
+        return f
+
+    @staticmethod
+    def _section(label: str, count: str = "", right: str = "") -> QVBoxLayout:
+        sec = QVBoxLayout()
+        sec.setSpacing(8)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(text(label, T.label_font(), T.MUTED))
+        if count:
+            c = QLabel(count)
+            c.setFont(T.sans(11, 700))
+            c.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            c.setMinimumWidth(18)
+            c.setFixedHeight(18)
+            c.setStyleSheet(f"color:{T.TEXT_SOFT};background:#1F2329;border-radius:9px;padding:0 5px;")
+            row.addWidget(c)
+        row.addStretch(1)
+        if right:
+            row.addWidget(text(right, T.sans(11), T.FAINT))
+        sec.addLayout(row)
+        return sec
+
+    @staticmethod
+    def _plain_box(s: str) -> QWidget:
+        box = Card(bg=T.SURFACE_IN_PANEL, border=T.SURFACE_IN_PANEL, radius=12, width=0)
+        box.body.setContentsMargins(12, 12, 12, 12)
+        box.body.addWidget(text(s, T.sans(13), T.MUTED2, wrap=True))
+        return box
+
+    @staticmethod
+    def _hours_box(h: dict) -> QWidget:
+        limit, left, used, pct = h["limit"], h.get("left", 0.0), h.get("used", 0.0), h.get("pct", 0)
+        over = pct >= 100 and used > limit
+        share = left / limit if limit else 0
+        color = T.ERROR if over or share <= 0.10 else T.CLIENT if share <= 0.30 else T.ACCENT
+        box = Card(bg=T.SURFACE_IN_PANEL, border=T.SURFACE_IN_PANEL, radius=12, width=0)
+        box.body.setContentsMargins(12, 12, 12, 12)
+        box.body.setSpacing(9)
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        big = text(("−" + _hours(used - limit)) if over else _hours(left), T.sans(26, 800, -3), color)
+        top.addWidget(big, 0, Qt.AlignmentFlag.AlignBaseline)
+        cap = f"ponad pakiet {_hours(limit)}" if over else f"zostało z {_hours(limit)}"
+        top.addWidget(text(cap, T.sans(13), T.MUTED2), 0, Qt.AlignmentFlag.AlignBaseline)
+        top.addStretch(1)
+        top.addWidget(text(f"{pct}% wykorzystane", T.sans(12), T.MUTED), 0, Qt.AlignmentFlag.AlignBaseline)
+        box.body.addLayout(top)
+        cells = QHBoxLayout()
+        cells.setSpacing(4)
+        cells.addWidget(HourCells(limit, left, color, over), 1)
+        if over:
+            cells.addWidget(pill("+" + _hours(used - limit), "#FF8A8A", _rgba(T.ERROR, 0.16), 11, 0))
+        box.body.addLayout(cells)
+        today = date.today()
+        foot = QHBoxLayout()
+        foot.addWidget(text(MONTHS[today.month - 1], T.sans(11), T.FAINT))
+        foot.addStretch(1)
+        foot.addWidget(text(f"odnowienie 1.{today.month % 12 + 1:02d}", T.sans(11), T.FAINT))
+        box.body.addLayout(foot)
+        return box
+
+
+class ElidedLabel(QLabel):
+    """One line, cut with … to the available width."""
+
+    def __init__(self, s: str, font, color: str):
+        super().__init__()
+        self.full = s
+        self.setFont(font)
+        self.setStyleSheet(f"color:{color};background:transparent;")
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.setText(s)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.setText(self.fontMetrics().elidedText(self.full, Qt.TextElideMode.ElideRight, self.width()))
+
+
+class StatusDot(QWidget):
+    def __init__(self, label: str, color: str):
+        super().__init__()
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(5)
+        dot = QLabel()
+        dot.setFixedSize(6, 6)
+        dot.setStyleSheet(f"background:{color};border-radius:3px;")
+        row.addWidget(dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(text(label, T.sans(11, 600), color))
+
+
+class Promise(QWidget):
+    """An agreed item from the last call, drawn as an empty checkbox."""
+
+    def __init__(self, s: str):
+        super().__init__()
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(9)
+        box = QLabel()
+        box.setFixedSize(16, 16)
+        box.setStyleSheet("border:1.5px solid #3A3F47;border-radius:5px;background:transparent;")
+        row.addWidget(box, 0, Qt.AlignmentFlag.AlignTop)
+        row.addWidget(text(s, T.sans(13), T.TEXT, wrap=True), 1)
 
 
 # ------------------------------------------------------------------ errors

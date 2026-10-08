@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from PyQt6.QtCore import QByteArray, QRectF, Qt
-from PyQt6.QtGui import QFont, QFontDatabase, QIcon, QPainter, QPixmap
+from PyQt6.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
@@ -117,9 +117,15 @@ SVG = {
                 '<path d="M3 21l7-7"/></svg>',
     "expand": f'<svg {_S} stroke-width="2.4"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/>'
               '<path d="M3 21l7-7"/></svg>',
+    "user": f'<svg {_S} stroke-width="2.2"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>',
     "check": f'<svg {_S} stroke-width="2.2"><path d="M20 6 9 17l-5-5"/></svg>',
     "download": f'<svg {_S} stroke-width="2.2"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>',
     "close": f'<svg {_S} stroke-width="2.2"><path d="M6 6l12 12"/><path d="M18 6 6 18"/></svg>',
+    "eye": f'<svg {_S} stroke-width="2"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/>'
+           '<circle cx="12" cy="12" r="3"/></svg>',
+    "eye_off": f'<svg {_S} stroke-width="2"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/>'
+               '<circle cx="12" cy="12" r="3"/><path d="M3 3l18 18"/></svg>',
+    "spinner": f'<svg {_S} stroke-width="2.6"><path d="M12 3a9 9 0 1 0 9 9"/></svg>',
     "alert": f'<svg {_S} stroke-width="2.2"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 '
              '0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>',
     "retry": f'<svg {_S} stroke-width="2.2"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>',
@@ -130,6 +136,9 @@ SVG = {
                  'fill="currentColor" d="M12 4H28a8 8 0 0 1 8 8V36H12a8 8 0 0 1-8-8V12a8 8 0 0 1 8-8Z '
                  'M11.5 13.5h17v5h-17Z M11.5 22.5h10v5h-10Z"/><rect x="38.5" y="38.5" width="8" height="8" rx="2" '
                  'fill="currentColor"/></svg>',
+    "logo_16": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="1 1 48 48"><path fill="currentColor" '
+               'd="M12 4H28a8 8 0 0 1 8 8V36H12a8 8 0 0 1-8-8V12a8 8 0 0 1 8-8Z"/>'
+               '<rect x="38" y="38" width="10" height="10" rx="2" fill="currentColor"/></svg>',
 }
 
 
@@ -149,6 +158,36 @@ def pixmap(name: str, color: str, size: int, dpr: float = 2.0) -> QPixmap:
 
 def icon(name: str, color: str, size: int) -> QIcon:
     return QIcon(pixmap(name, color, size))
+
+
+def app_tile(size: int) -> QPixmap:
+    """The app icon: the red logo on a dark rounded tile (exe, taskbar, tray, windows).
+
+    Like the mockup's 64 px tile: radius 16/64, logo 40/64; small sizes get the simpler marks.
+    """
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    edge = max(1.0, size / 64)
+    r = QRectF(edge / 2, edge / 2, size - edge, size - edge)
+    p.setPen(QPen(QColor(DIVIDER), edge) if size >= 24 else Qt.PenStyle.NoPen)
+    p.setBrush(QColor(SURFACE))
+    p.drawRoundedRect(r, size * 16 / 64, size * 16 / 64)
+    name = "logo_full" if size >= 32 else "logo" if size >= 24 else "logo_16"
+    logo = size * (40 / 64 if size >= 32 else 0.7)
+    off = (size - logo) / 2
+    svg = SVG[name].replace("currentColor", BRAND)
+    QSvgRenderer(QByteArray(svg.encode())).render(p, QRectF(off, off, logo, logo))
+    p.end()
+    return pm
+
+
+def app_icon() -> QIcon:
+    ic = QIcon()
+    for size in (16, 20, 24, 32, 40, 48, 64, 128, 256):
+        ic.addPixmap(app_tile(size))
+    return ic
 
 
 def fmt_seconds(s: float) -> str:

@@ -1,7 +1,7 @@
 """Gemini call with the EMANAGER master prompt.
 
 The master prompt file ends with a "current context" block holding the
-placeholders {rag_context}, {last_hint}, {transcript_history}. We split the file
+placeholders {client_context}, {rag_context}, {last_hint}, {transcript_history}. We split the file
 there: the static part (role, standards, rules, format) goes to
 `system_instruction`, the filled-in dynamic block goes to `contents`. The model
 sees exactly the same text as one filled prompt, but the static prefix is
@@ -21,9 +21,11 @@ from pathlib import Path
 
 log = logging.getLogger("llm")
 
-PLACEHOLDERS = ("{rag_context}", "{last_hint}", "{transcript_history}")
+PLACEHOLDERS = ("{client_context}", "{rag_context}", "{last_hint}", "{transcript_history}")
 CATEGORIES = {"info", "objection", "script", "warning"}
-SILENT = {"show": False, "category": "", "hint": ""}
+SILENT = {"show": False, "category": "", "hint": "", "caller": ""}
+NO_CLIENT = ("- Rozmówca nie został jeszcze zidentyfikowany w CRM. Rozpoznaj go ze słuchu; "
+             "jeśli to nowy kontakt, stosuj scenariusz nowego leada.")
 UNKNOWN_PLACEHOLDER = re.compile(r"\{[a-z][a-z0-9_]*\}")
 NO_DATA = "brak danych"
 
@@ -48,11 +50,15 @@ class MasterPrompt:
     def load(cls, path: Path) -> "MasterPrompt":
         return cls(path.read_text(encoding="utf-8"))
 
-    def render(self, rag_context: str, last_hint: str, transcript_history: str) -> tuple[str, str]:
+    def render(self, rag_context: str, last_hint: str, transcript_history: str,
+               client_context: str = "") -> tuple[str, str]:
         # placeholders the app has no data for (e.g. caller ID / CRM fields) must not reach
         # the model as literal "{caller_name}"
         dyn = UNKNOWN_PLACEHOLDER.sub(lambda m: m[0] if m[0] in PLACEHOLDERS else NO_DATA, self.dynamic)
-        dyn = (dyn.replace("{rag_context}", rag_context)
+        # the client block goes first in the dynamic part: it stays the same for the whole call,
+        # so Gemini's implicit cache covers it together with the static prefix
+        dyn = (dyn.replace("{client_context}", client_context or NO_CLIENT)
+               .replace("{rag_context}", rag_context)
                .replace("{last_hint}", last_hint)
                .replace("{transcript_history}", transcript_history))
         if "{rag_context}" not in self.dynamic and rag_context and not rag_context.startswith("("):
@@ -64,7 +70,9 @@ class MasterPrompt:
 
 
 def parse_hint(raw: str) -> dict:
-    """Validate the model output; anything malformed means 'stay silent'."""
+    """Validate the model output; anything malformed means 'stay silent'.
+
+    `caller` (who the caller said they are) is kept even when there is no hint to show."""
     raw = (raw or "").strip()
     raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw)
     try:
@@ -77,13 +85,16 @@ def parse_hint(raw: str) -> dict:
             data = json.loads(m.group(0))
         except json.JSONDecodeError:
             return dict(SILENT)
-    if not isinstance(data, dict) or not data.get("show"):
+    if not isinstance(data, dict):
         return dict(SILENT)
+    caller = " ".join(str(data.get("caller") or "").split())[:80]
+    if not data.get("show"):
+        return {**SILENT, "caller": caller}
     category = str(data.get("category", "")).strip().lower()
     hint = " ".join(str(data.get("hint", "")).split())
     if category not in CATEGORIES or not hint:
-        return dict(SILENT)
-    return {"show": True, "category": category, "hint": hint}
+        return {**SILENT, "caller": caller}
+    return {"show": True, "category": category, "hint": hint, "caller": caller}
 
 
 class HintLLM:
@@ -115,9 +126,10 @@ class HintLLM:
                     "show": {"type": "BOOLEAN"},
                     "category": {"type": "STRING"},
                     "hint": {"type": "STRING"},
+                    "caller": {"type": "STRING"},
                 },
                 "required": ["show", "category", "hint"],
-                "propertyOrdering": ["show", "category", "hint"],
+                "propertyOrdering": ["show", "category", "hint", "caller"],
             }
         return t.GenerateContentConfig(**kw)
 
@@ -136,8 +148,9 @@ class HintLLM:
             msg = getattr(e, "message", None) or str(e)  # google.genai APIError: "API key not valid…"
             return f"{getattr(e, 'code', type(e).__name__)} {msg}"[:300]
 
-    async def decide(self, rag_context: str, last_hint: str, transcript_history: str) -> dict:
-        system, user = self.prompt.render(rag_context, last_hint, transcript_history)
+    async def decide(self, rag_context: str, last_hint: str, transcript_history: str,
+                     client_context: str = "") -> dict:
+        system, user = self.prompt.render(rag_context, last_hint, transcript_history, client_context)
         try:
             resp = await asyncio.wait_for(
                 self.client.aio.models.generate_content(model=self.model, contents=user,

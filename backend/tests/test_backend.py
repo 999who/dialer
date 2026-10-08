@@ -98,8 +98,8 @@ class FakeLLM:
     def __init__(self, result, delay=0.0):
         self.result, self.delay, self.calls = result, delay, []
 
-    async def decide(self, rag_context, last_hint, history):
-        self.calls.append((rag_context, last_hint, history))
+    async def decide(self, rag_context, last_hint, history, client_context=""):
+        self.calls.append((rag_context, last_hint, history, client_context))
         await asyncio.sleep(self.delay)
         return dict(self.result)
 
@@ -194,12 +194,46 @@ def test_new_prompt_without_rag_slot_gets_no_literal_placeholders_and_kb_matches
 
     p = MasterPrompt.load(ROOT.parent / "prompts" / "master_prompt_pl.md")
     static, dyn = p.render("[1] Sklep od 5000 zł", "(brak)", "[Klient]: Ile kosztuje sklep?")
-    assert "# ROLA" in static and "{caller_name}" not in dyn and "brak danych" in dyn
+    assert "# ROLA" in static and "{" + "client_context}" not in dyn and "{caller_name}" not in dyn
+    assert "nie został jeszcze zidentyfikowany" in dyn  # no CRM card yet
     assert "[Klient]: Ile kosztuje sklep?" in dyn
     if "{rag_context}" not in p.dynamic:
         assert "Sklep od 5000 zł" in dyn
     _, dyn = p.render("(brak dopasowań w bazie wiedzy)", "(brak)", "x")
     assert "FRAGMENTY BAZY WIEDZY" not in dyn
+
+
+def test_client_context_goes_first_in_the_dynamic_part():
+    p = MasterPrompt.load(PROMPT)
+    _, dyn = p.render("(brak)", "(brak)", "[Klient]: Dzień dobry", "- Firma / klient: Floresca")
+    assert "- Firma / klient: Floresca" in dyn
+    assert dyn.index("Floresca") < dyn.index("[Klient]: Dzień dobry")
+
+
+def test_parse_hint_keeps_caller_without_hint():
+    assert parse_hint('{"show": false, "category": "", "hint": "", "caller": "Marek, Bipromasz"}') == {
+        "show": False, "category": "", "hint": "", "caller": "Marek, Bipromasz"}
+    assert parse_hint('{"show": true, "category": "info", "hint": "Cena od 5000 zł"}')["caller"] == ""
+
+
+def test_session_passes_client_context_and_reports_caller_once():
+    async def go():
+        sent = []
+        llm = FakeLLM({"show": False, "category": "", "hint": "", "caller": "Marek, Bipromasz"})
+
+        async def send(m): sent.append(m)
+        s = CallSession(settings=S, llm=llm, kb=FakeKB([]), embedder=FakeEmbedder(), send=send)
+        await s.start_call("")
+        s.client_context = "- Firma / klient: Bipromasz"
+        await s.on_utterance(Utterance("client", "Dzień dobry, tu Marek z Bipromaszu.", 1, 2))
+        await asyncio.sleep(0.05)
+        await s.on_utterance(Utterance("client", "Mam pytanie o stronę internetową?", 3, 4))
+        await asyncio.sleep(0.05)
+        assert llm.calls[0][3] == "- Firma / klient: Bipromasz"
+        assert [m["text"] for m in sent if m["type"] == "caller"] == ["Marek, Bipromasz"]
+        await s.start_call("")
+        assert s.client_context == "" and s.caller == ""  # nothing carries over to the next call
+    run(go())
 
 
 def test_unreachable_database_does_not_stop_startup(monkeypatch):
