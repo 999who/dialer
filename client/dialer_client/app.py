@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import tempfile
 import threading
@@ -682,6 +683,9 @@ def relaunch() -> None:
     args = sys.argv[1:] if getattr(sys, "frozen", False) else sys.argv
     if _lock is not None:
         _lock.unlock()
+    # Without this the new onefile exe reuses this process's unpacked folder (_MEI...), which is
+    # deleted as soon as this process exits: "DLL load failed while importing QtCore".
+    os.environ["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     QProcess.startDetached(sys.executable, args)
     QApplication.quit()
 
