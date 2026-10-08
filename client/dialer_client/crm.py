@@ -226,7 +226,7 @@ class Crm:
     def __init__(self, sb: Supabase, own_numbers: list[str] | None = None):
         self.sb = sb
         self.own = {normalize_phone(n) for n in (own_numbers or []) if normalize_phone(n)}
-        self._cache_at = 0.0
+        self._cache_at: float | None = None   # not 0.0: monotonic() can be small right after boot
         self.clients: dict[str, dict] = {}
         self.deals: list[dict] = []
         self.persons: list[dict] = []
@@ -235,7 +235,7 @@ class Crm:
 
     # ------------------------------------------------------------ cache
     def refresh_cache(self, force: bool = False) -> None:
-        if not force and time.monotonic() - self._cache_at < CACHE_TTL_S:
+        if not force and self._cache_at is not None and time.monotonic() - self._cache_at < CACHE_TTL_S:
             return
         rows = self.sb.select("clients", select="id,name,phone,status,has_retainer,monthly_hours_limit,is_demo")
         self.clients = {r["id"]: r for r in rows if not r.get("is_demo") and not TEST_NAMES.search(r["name"] or "")}
