@@ -5,8 +5,9 @@ Protocol (one WebSocket per operator, path /ws):
 client -> server
   text   {"type":"hello","token":"…","agent_id":"…","sample_rate":16000,"channels":2,"format":"s16le"}
   binary interleaved stereo PCM16 @16 kHz, L = operator mic, R = client (loopback), ~100 ms per frame
-  text   {"type":"call_start","phone":"+48 512 *** 204"} | {"type":"call_end"}
+  text   {"type":"call_start","phone":"+48 512 *** 204","agent_id":"…"} | {"type":"call_end"}
   text   {"type":"pause","paused":true}
+  text   {"type":"client_context","text":"…"}   # CRM client block for the prompt (the app found the caller)
   text   {"type":"feedback","hint_id":"…","useful":true|false} | {"type":"feedback","hint_id":"…","copied":true}
   text   {"type":"text","speaker":"client|operator","text":"…"}   # test injection, bypasses STT
 
@@ -17,6 +18,7 @@ server -> client
   {"type":"hint","id":"…","category":"objection","topic":"cena","hint":"…","quote":"…","match":0.92,
    "variants":["…"],"sources":[{"title":"…","ref":"…"}],"latency_ms":1800}
   {"type":"latency","ms":1650}
+  {"type":"caller","text":"Marek, Bipromasz"}   # who the caller said they are (for a CRM lookup by name)
   {"type":"call_summary","duration_s":468,"summary":"…","hints":5,"used":3,"objections":2}
   {"type":"error","code":"auth|bad_format","message":"…"}
 """
@@ -155,12 +157,15 @@ async def ws_endpoint(ws: WebSocket):
             data = json.loads(msg.get("text") or "{}")
             kind = data.get("type")
             if kind == "call_start":
+                session.agent_id = str(data.get("agent_id") or session.agent_id)[:120]
                 await session.start_call(str(data.get("phone", ""))[:32])
             elif kind == "call_end":
                 for segm in segmenters:
                     for seg in segm.flush():
                         await transcribe(seg)
                 await session.end_call()
+            elif kind == "client_context":
+                session.client_context = str(data.get("text", ""))[:6000]
             elif kind == "pause":
                 session.paused = bool(data.get("paused"))
             elif kind == "feedback":

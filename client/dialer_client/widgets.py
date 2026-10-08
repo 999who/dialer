@@ -271,6 +271,57 @@ class HintCard(Card):
         self.feedback.emit(self.hint_id, useful)
 
 
+# ------------------------------------------------------------------ client card
+CLIENT_KIND = {"client": ("KLIENT", T.ACCENT), "lead": ("LEAD", T.OPERATOR),
+               "contact": ("KONTAKT", T.CLIENT), "unknown": ("NIEZNANY ROZMÓWCA", T.MUTED)}
+
+
+class ClientCard(Card):
+    """Who is calling, from the CRM. Stays on screen for the whole call (no auto-hide)."""
+
+    closed = pyqtSignal()
+
+    def __init__(self, data: dict):
+        super().__init__()
+        self.body.setSpacing(6)
+        self.data = data
+        label, color = CLIENT_KIND.get(data.get("kind"), CLIENT_KIND["unknown"])
+        via = "po nazwie" if data.get("via") == "name" else ""
+        row, _, _ = header_row(label, color, via, icon="user")
+        close = button(icon="close", fg=T.MUTED, w=24, h=24, icon_size=12, tip="Ukryj kartę klienta")
+        close.clicked.connect(self.closed.emit)
+        row.addWidget(close)
+        self.body.addLayout(row)
+        title = data.get("title") or data.get("person") or "Brak w CRM"
+        self.body.addWidget(text(title, T.serif(18), T.TEXT_STRONG, wrap=True))
+        if data.get("person") and data.get("title"):
+            self.body.addWidget(text(data["person"], T.sans(12), T.TEXT_SOFT, wrap=True))
+        lines = []
+        if data.get("retainer"):
+            lines.append(("Godziny", data["retainer"]))
+        if data.get("tickets"):
+            lines.append((f"Zgłoszenia ({len(data['tickets'])})", "\n".join(data["tickets"][:2])))
+        if data.get("last_call"):
+            lines.append(("Ostatnia rozmowa", data["last_call"]))
+        if data.get("promised"):
+            lines.append(("Ustalenia", data["promised"]))
+        if data.get("deals"):
+            lines.append(("Szansa sprzedaży", data["deals"][0]))
+        if data.get("callback"):
+            lines.append(("Do zrobienia", data["callback"]))
+        if not lines and data.get("kind") == "unknown":
+            lines.append(("", "Numer nie występuje w CRM. Karta pojawi się, gdy rozmówca się przedstawi."))
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(4)
+        grid.setColumnStretch(1, 1)
+        for i, (k, v) in enumerate(lines):
+            grid.addWidget(text(k, T.sans(11, 600), T.MUTED), i, 0, Qt.AlignmentFlag.AlignTop)
+            grid.addWidget(text(v, T.sans(12), T.TEXT, wrap=True), i, 1)
+        if lines:
+            self.body.addLayout(grid)
+
+
 # ------------------------------------------------------------------ errors
 INFO_KINDS = {"loading", "update"}  # not an error: shown in the accent colour
 

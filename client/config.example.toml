@@ -33,3 +33,10 @@ call_end_silence_s = 15
 no_line_warning_s = 12
 require_zadarma = true
 offline_buffer_s = 60
+
+# EMANAGER CRM: the client card during a call. The operator signs in with their CRM account
+# (logo -> "Konto CRM"). URL and the publishable key: Supabase -> Project Settings -> API.
+crm_url = ""
+crm_key = ""
+crm_sip = ""                  # Zadarma extension of this PC, e.g. "100"; empty = any
+own_numbers = "609037902, 525275052"   # company numbers: no client card

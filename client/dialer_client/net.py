@@ -132,7 +132,8 @@ class BackendLink(QObject):
     def call_start(self, phone: str = "") -> None:
         self.in_call, self.phone = True, phone
         self._audio.clear()
-        self.send({"type": "call_start", "phone": phone})
+        # agent_id again: the operator may have signed in to the CRM after this connection opened
+        self.send({"type": "call_start", "phone": phone, "agent_id": self.agent_id})
 
     def call_end(self) -> None:
         self.in_call = False

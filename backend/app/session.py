@@ -63,6 +63,8 @@ class CallSession:
         self.started_at = time.monotonic()
         self.history: deque[Utterance] = deque(maxlen=200)
         self.last_hint = ""
+        self.client_context = ""   # the CRM client block, sent by the app once it knows the caller
+        self.caller = ""           # who the caller said they are, as Gemini heard it
         self.paused = False
         self.stats = {"hints": 0, "used": 0, "objections": 0}
         self._busy = False
@@ -76,6 +78,8 @@ class CallSession:
         self.started_at = time.monotonic()
         self.history.clear()
         self.last_hint = ""
+        self.client_context = ""
+        self.caller = ""
         self.stats = {"hints": 0, "used": 0, "objections": 0}
         self._hint_ids.clear()
         self._used_ids.clear()
@@ -160,7 +164,8 @@ class CallSession:
         rag_context = "\n\n".join(m.to_prompt(i + 1) for i, m in enumerate(matches)) \
             or "(brak dopasowań w bazie wiedzy)"
         result = await self.llm.decide(rag_context, self.last_hint or "(brak)",
-                                       self._format_history(self.s.history_turns)) if self.llm else dict(SILENT)
+                                       self._format_history(self.s.history_turns),
+                                       self.client_context) if self.llm else dict(SILENT)
         t_llm = time.monotonic()
         latency_ms = int((t_llm - u.ended_at) * 1000)
         log.info("utt=%r rag=%dms llm=%dms total=%dms -> %s", u.text[:60], (t_rag - t0) * 1000,
@@ -169,6 +174,10 @@ class CallSession:
         if call_id != self.call_id:  # call ended / restarted meanwhile
             return
         await self.send({"type": "latency", "ms": latency_ms})
+        caller = result.get("caller", "")
+        if caller and caller != self.caller:
+            self.caller = caller  # the app looks this name up in the CRM when the number didn't match
+            await self.send({"type": "caller", "text": caller})
         if not result["show"] or result["hint"] == self.last_hint:
             return
 

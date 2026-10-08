@@ -117,6 +117,7 @@ SVG = {
                 '<path d="M3 21l7-7"/></svg>',
     "expand": f'<svg {_S} stroke-width="2.4"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/>'
               '<path d="M3 21l7-7"/></svg>',
+    "user": f'<svg {_S} stroke-width="2.2"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>',
     "check": f'<svg {_S} stroke-width="2.2"><path d="M20 6 9 17l-5-5"/></svg>',
     "download": f'<svg {_S} stroke-width="2.2"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>',
     "close": f'<svg {_S} stroke-width="2.2"><path d="M6 6l12 12"/><path d="M18 6 6 18"/></svg>',

@@ -15,6 +15,8 @@ from PyQt6.QtWidgets import QApplication, QDialog, QMenu, QMessageBox, QSystemTr
 
 from . import theme as T
 from .config import CONFIG_PATH, Config, load_config, needs_setup, save_values
+from .crm import Crm, CrmError, Supabase
+from .login_dialog import LoginDialog
 from .settings_dialog import SettingsDialog
 from .detect import CallDetector, ZadarmaWatcher
 from .local_server import LocalServer
@@ -33,6 +35,7 @@ class Bridge(QObject):
     zadarma = pyqtSignal(object)
     zadarma_audio = pyqtSignal(object)
     update = pyqtSignal(str, object)  # (event, payload) from the updater thread
+    crm = pyqtSignal(str, object)     # (event, payload) from CRM worker threads
 
 
 class DialerApp(QObject):
@@ -57,6 +60,11 @@ class DialerApp(QObject):
         self.bridge.zadarma.connect(self._on_zadarma)
         self.bridge.zadarma_audio.connect(self._on_zadarma_audio)
         self.bridge.update.connect(self._on_update_event)
+        self.bridge.crm.connect(self._on_crm_event)
+        self.crm: Crm | None = None        # set once the operator is signed in
+        self.operator = ""                 # their name, for the menu and the log
+        self.card = None                   # ClientCard of the current call
+        self._call_seq = 0                 # a lookup for an earlier call must not land on this one
         self._release = None
         self._updating = False
         self.link.message.connect(self._on_message)
@@ -107,6 +115,7 @@ class DialerApp(QObject):
             QTimer.singleShot(15000, lambda: self.check_updates(manual=False))
             self._update_timer = QTimer(self, interval=6 * 3600 * 1000, timeout=lambda: self.check_updates(False))
             self._update_timer.start()
+        QTimer.singleShot(0, self._crm_startup)
         self.watcher.start()
         if self.cfg.call_detect == "zadarma":
             self.zwatch.start()
@@ -124,6 +133,7 @@ class DialerApp(QObject):
         menu = QMenu()
         menu.addAction("Pokaż", lambda: (self.overlay.showNormal(), self.overlay.reposition()))
         menu.addAction("Ustawienia (Gemini, baza wiedzy)…", lambda: self.open_connection_settings())
+        menu.addAction("Konto CRM…", self._account_action)
         menu.addAction("Sprawdź aktualizacje", lambda: self.check_updates(manual=True))
         menu.addAction("Zamknij", QApplication.quit)
         self.tray.setContextMenu(menu)
@@ -160,11 +170,14 @@ class DialerApp(QObject):
             self.overlay.clear_error("no_line")
 
     def _call_started(self) -> None:
-        log.info("call started")
+        log.info("call started, operator: %s", self.operator or "(not signed in)")
         self.transcript.clear()
         self.overlay.clear_screen()  # nothing from the previous call stays on screen
         self.overlay.set_paused(False)  # pause is for one call only
         self.link.call_start("")
+        self._call_seq += 1
+        self.card = None
+        self._lookup_number(self._call_seq)
         for f in self.preroll:
             self.link.send_audio(f)
         self.preroll.clear()
@@ -295,6 +308,8 @@ class DialerApp(QObject):
             self.overlay.show_hint(m)
         elif t == "latency":
             self.overlay.set_latency(int(m["ms"]))
+        elif t == "caller":
+            self._lookup_name(str(m.get("text", "")), self._call_seq)
         elif t == "call_summary":
             m["transcript"] = list(self.transcript)
             self.overlay.show_summary(m)
@@ -356,6 +371,8 @@ class DialerApp(QObject):
                 group.addAction(a)
                 sub.addAction(a)
             menu.addAction("Ustawienia (Gemini, baza wiedzy)…", lambda: self.open_connection_settings())
+            menu.addAction(f"Konto CRM: {self.operator} (wyloguj)" if self.crm else "Zaloguj do CRM…",
+                           self._account_action)
             menu.addAction(f"Sprawdź aktualizacje (wersja {updater.version_label()})",
                            lambda: self.check_updates(manual=True))
             menu.addAction("Pokaż dziennik (log)", lambda: QDesktopServices.openUrl(
@@ -375,6 +392,138 @@ class DialerApp(QObject):
         self._manual_zadarma_idle = False  # switch to Zadarma only on a call that starts after this
         self.detector.force(True)
         self._call_started()
+
+    # ---------------------------------------------------------------- CRM: operator and client card
+    def _crm_worker(self, name: str, fn) -> None:
+        """Runs fn() in a thread; its (event, payload) result comes back on the Qt thread."""
+        def work():
+            try:
+                self.bridge.crm.emit(*fn())
+            except Exception as e:
+                log.warning("crm %s failed: %s", name, e)
+                self.bridge.crm.emit("failed", (name, e))
+
+        threading.Thread(target=work, name=f"crm-{name}", daemon=True).start()
+
+    def _crm_startup(self) -> None:
+        token = self.qs.value("crm/refresh_token", "")
+        if not (self.cfg.crm_url and self.cfg.crm_key and token):
+            QTimer.singleShot(300, self.crm_login)
+            return
+        sb = Supabase(self.cfg.crm_url, self.cfg.crm_key)
+
+        def resume():
+            sb.refresh(token)
+            return "signed_in", sb
+
+        self._crm_worker("resume", resume)
+
+    def crm_login(self, reason: str = "") -> None:
+        dlg = LoginDialog(self.cfg, self.qs.value("crm/email", ""), reason)
+        if dlg.exec() != QDialog.DialogCode.Accepted or dlg.sb is None:
+            return
+        conn = dlg.connection()
+        if conn != {k: getattr(self.cfg, k) for k in conn}:
+            for k, v in conn.items():
+                setattr(self.cfg, k, v)
+            try:
+                save_values(conn)
+            except OSError as e:
+                log.error("cannot save %s: %s", CONFIG_PATH, e)
+        self._on_crm_event("signed_in", dlg.sb)
+
+    def _account_action(self) -> None:
+        if not self.crm:
+            self.crm_login()
+            return
+        sb = self.crm.sb
+        threading.Thread(target=sb.sign_out, daemon=True).start()
+        self.qs.remove("crm/refresh_token")
+        log.info("operator %s signed out", self.operator)
+        self.crm, self.operator = None, ""
+        self.link.agent_id = self.cfg.agent_id
+        self.crm_login()
+
+    def _lookup_number(self, seq: int) -> None:
+        crm = self.crm
+        if not crm:
+            return
+
+        def work():
+            # Zadarma's webhook reaches the CRM about a second after the call starts
+            call = None
+            for _ in range(8):
+                try:
+                    call = crm.current_call(self.cfg.crm_sip)
+                except CrmError as e:  # a network hiccup: try again within the same window
+                    log.info("current call lookup: %s", e)
+                if call or not crm.has_current_call_fn or seq != self._call_seq:
+                    break
+                time.sleep(1.0)
+            if not call:
+                return "no_number", seq
+            log.info("caller: %s call on extension %s", call.get("direction"), call.get("internal"))
+            return "card", (seq, crm.by_phone(call.get("phone", "")))
+
+        self._crm_worker("number", work)
+
+    def _lookup_name(self, heard: str, seq: int) -> None:
+        if not self.crm or not heard or (self.card is not None and self.card.kind != "unknown"):
+            return  # the number already found them; a name only fills the gap
+        crm = self.crm
+        log.info("caller introduced themselves: %r", heard)
+
+        def work():
+            card = crm.by_name(heard)
+            return ("card", (seq, card)) if card.found else ("no_name", seq)
+
+        self._crm_worker("name", work)
+
+    def _on_crm_event(self, event: str, payload) -> None:
+        if event == "signed_in":
+            sb: Supabase = payload
+            sb.on_session = lambda s: self.bridge.crm.emit("token", s.refresh_token)
+            self.qs.setValue("crm/refresh_token", sb.session.refresh_token)
+            self.qs.setValue("crm/email", sb.session.email)
+            self.crm = Crm(sb, [n for n in self.cfg.own_numbers.split(",") if n.strip()])
+            self.operator = sb.session.email
+            self.link.agent_id = sb.session.email  # the backend logs calls under this operator
+
+            def warm():
+                profile = self.crm.load_profile()
+                self.crm.refresh_cache(force=True)
+                return "profile", profile
+
+            self._crm_worker("profile", warm)
+        elif event == "token":
+            if self.crm:
+                self.qs.setValue("crm/refresh_token", payload)
+        elif event == "profile":
+            self.operator = payload.get("full_name") or self.operator
+            log.info("signed in to the CRM as %s", self.operator)
+            self._notify(f"Zalogowano do CRM: {self.operator}")
+        elif event == "card":
+            seq, card = payload
+            if seq != self._call_seq or not self.detector.in_call:
+                return
+            self.card = card
+            self.overlay.show_client(card.to_dict())
+            self.link.send({"type": "client_context", "text": card.to_prompt()})
+            log.info("client card: %s (%s, by %s)", card.title or card.person or "-", card.kind, card.via)
+        elif event == "no_number":
+            if payload == self._call_seq and self.detector.in_call and self.crm and self.crm.has_current_call_fn:
+                log.info("no Zadarma event for this call in the CRM")
+        elif event == "failed":
+            name, e = payload
+            if name == "resume":
+                if isinstance(e, CrmError) and e.status in (400, 401, 403):  # the saved session is gone
+                    self.qs.remove("crm/refresh_token")
+                    QTimer.singleShot(0, lambda: self.crm_login("Sesja CRM wygasła. Zaloguj się ponownie."))
+                else:  # no network yet: keep the session and retry in a minute
+                    QTimer.singleShot(60000, self._crm_startup)
+            elif isinstance(e, CrmError) and e.status == 401 and self.crm:
+                self.crm = None
+                self._notify("Sesja CRM wygasła. Zaloguj się ponownie (logo → Konto CRM).")
 
     # ---------------------------------------------------------------- updates
     def check_updates(self, manual: bool = True) -> None:

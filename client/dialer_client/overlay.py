@@ -14,7 +14,7 @@ from PyQt6.QtCore import QPoint, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QGraphicsOpacityEffect, QVBoxLayout, QWidget
 
 from . import theme as T
-from .widgets import Card, ErrorCard, ExpandedPanel, HintCard, StatusBar, SummaryCard
+from .widgets import Card, ClientCard, ErrorCard, ExpandedPanel, HintCard, StatusBar, SummaryCard
 
 MAX_STACK = 3
 CORNERS = {"bottom-right": "Prawy dolny róg", "bottom-left": "Lewy dolny róg",
@@ -117,8 +117,9 @@ class Overlay(QWidget):
         top = self.corner.startswith("top")
         for c in self.cards:
             self.stack.removeWidget(c)
-        # newest card next to the bar
-        ordered = list(reversed(self.cards)) if top else list(self.cards)
+        # newest card next to the bar; the client card is always the closest one
+        near = [c for c in self.cards if not isinstance(c, ClientCard)] + [c for c in self.cards if isinstance(c, ClientCard)]
+        ordered = list(reversed(near)) if top else near
         for c in ordered:
             self.stack.addWidget(c)
         for i, c in enumerate(reversed(self.cards)):
@@ -126,7 +127,7 @@ class Overlay(QWidget):
             if not isinstance(eff, QGraphicsOpacityEffect):
                 eff = QGraphicsOpacityEffect(c)
                 c.setGraphicsEffect(eff)
-            eff.setOpacity(1.0 if i == 0 or isinstance(c, ErrorCard) else 0.45)
+            eff.setOpacity(1.0 if i == 0 or isinstance(c, (ErrorCard, ClientCard)) else 0.45)
         self.stack_host.setVisible(any(not (self.expanded and isinstance(c, HintCard)) for c in self.cards))
         QTimer.singleShot(0, self.reposition)
 
@@ -180,8 +181,8 @@ class Overlay(QWidget):
     # ------------------------------------------------------------ cards
     def _push(self, card: Card) -> None:
         self.cards.append(card)
-        # keep at most MAX_STACK non-error cards
-        regular = [c for c in self.cards if not isinstance(c, ErrorCard)]
+        # keep at most MAX_STACK hints/summaries (errors and the client card don't count)
+        regular = [c for c in self.cards if not isinstance(c, (ErrorCard, ClientCard))]
         for old in regular[:-MAX_STACK]:
             self._remove(old, restack=False)
         if self.expanded and isinstance(card, HintCard):
@@ -222,6 +223,19 @@ class Overlay(QWidget):
         card.open_transcript.connect(lambda d=data: self.open_transcript.emit(d))
         self._push(card)
         self.panel.set_hint(None)
+
+    def show_client(self, data: dict) -> None:
+        """The CRM card of the caller; replaces the previous one and stays until the next call."""
+        self.clear_client(restack=False)
+        card = ClientCard(data)
+        card.closed.connect(lambda c=card: self._remove(c))
+        self._push(card)
+
+    def clear_client(self, restack: bool = True) -> None:
+        for c in [c for c in self.cards if isinstance(c, ClientCard)]:
+            self._remove(c, restack=False)
+        if restack:
+            self._restack()
 
     def show_error(self, kind: str, note: str = "") -> None:
         if kind in self.dismissed_errors:
