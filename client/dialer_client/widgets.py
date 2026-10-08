@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import time
-from datetime import date
+from datetime import date, datetime
 from html import escape
 
 from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PyQt6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QLabel, QPushButton,
                              QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
@@ -300,6 +300,24 @@ def _ago(iso: str) -> str:
     return "dziś" if days <= 0 else "wczoraj" if days == 1 else f"{days} dni temu"
 
 
+WEEKDAYS = ("poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota", "niedziela")
+
+
+def _when(iso: str) -> str:
+    """'dziś, 13:00', 'wczoraj, 9:05', 'środa, 17:34' within a week, else '01.10.2026, 13:00' (local time)."""
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return _pl_date(iso)
+    if len(iso) <= 10:  # a bare date, no time to show
+        return _pl_date(iso)
+    dt = dt.astimezone() if dt.tzinfo else dt
+    days = (date.today() - dt.date()).days
+    day = ("dziś" if days <= 0 else "wczoraj" if days == 1 else WEEKDAYS[dt.weekday()] if days < 7
+           else dt.strftime("%d.%m.%Y"))
+    return f"{day}, {dt.hour}:{dt.minute:02d}"
+
+
 def _pl_date(iso: str) -> str:
     try:
         return date.fromisoformat(iso[:10]).strftime("%d.%m.%Y")
@@ -437,23 +455,47 @@ class ClientCard(Card):
         if data.get("last_call_at") or data.get("callback") or (deal and kind != "lead"):
             self.body.addWidget(self._sep())
         if data.get("last_call_at"):
-            sec = self._section("OSTATNIA ROZMOWA", "", _ago(data["last_call_at"]))
-            line = QLabel(f'<span style="color:{T.MUTED2}">{_pl_date(data["last_call_at"])}</span> · '
-                          f'{escape(data.get("last_call_title") or "")}')
-            line.setFont(T.sans(13))
-            line.setStyleSheet(f"color:{T.TEXT};background:transparent;")
-            line.setWordWrap(True)
-            sec.addWidget(line)
-            for item in data.get("promises") or []:
-                sec.addWidget(Promise(item))
+            when = _when(data["last_call_at"])
+            ago = _ago(data["last_call_at"])
+            earlier = data.get("earlier_calls") or []
+            sec = self._section("OSTATNIE ROZMOWY" if earlier else "OSTATNIA ROZMOWA", "",
+                                "" if when.split(",")[0] in (ago, *WEEKDAYS) else ago)
+            calls = [{"at": data["last_call_at"], "title": data.get("last_call_title") or "",
+                      "summary": data.get("last_call_summary") or ""}] + earlier
+            fm = QFontMetrics(T.sans(13))
+            when_w = max(fm.horizontalAdvance(_when(c["at"])) for c in calls) + 2  # one column for all times
+            for i, c in enumerate(calls):  # every call looks the same; only the latest lists what was agreed
+                sec.addWidget(self._call_row(c, when_w, lines=2 if i == 0 else 1))
+                if i == 0 and data.get("promises"):
+                    box = QVBoxLayout()
+                    box.setContentsMargins(0, 0, 0, 4)
+                    box.setSpacing(6)
+                    box.addWidget(text("USTALENIA", T.sans(10, 700), T.FAINT))
+                    for item in data["promises"]:
+                        box.addWidget(Promise(item))
+                    sec.addLayout(box)
             self.body.addLayout(sec)
         if data.get("callback") or (deal and kind != "lead"):
             sec = self._section("DO ZROBIENIA")
             if data.get("callback"):
-                sec.addWidget(text(data["callback"], T.sans(13), T.TEXT, wrap=True))
+                sec.addWidget(ClampLabel(data["callback"], T.sans(13), T.TEXT, lines=2))
             if deal and kind != "lead":
-                sec.addWidget(text(f"Szansa sprzedaży: {deal}", T.sans(13), T.TEXT_SOFT, wrap=True))
+                sec.addWidget(ClampLabel(f"Szansa sprzedaży: {deal}", T.sans(13), T.TEXT_SOFT, lines=2))
             self.body.addLayout(sec)
+
+    @staticmethod
+    def _call_row(c: dict, when_w: int, lines: int) -> QWidget:
+        """'wtorek, 16:46  Topic of the call', same size for every call; the AI summary on hover."""
+        w = QWidget()
+        row = QHBoxLayout(w)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        when = text(_when(c["at"]), T.sans(13), T.MUTED2)
+        when.setFixedWidth(when_w)
+        row.addWidget(when, 0, Qt.AlignmentFlag.AlignTop)
+        tip = c["title"] + (f"\n\n{c['summary']}" if c.get("summary") else "")
+        row.addWidget(ClampLabel(c["title"], T.sans(13), T.TEXT, lines=lines, tip=tip), 1)
+        return w
 
     @staticmethod
     def _sep() -> QFrame:
@@ -530,13 +572,76 @@ class ElidedLabel(QLabel):
         super().__init__()
         self.full = s
         self.setFont(font)
-        self.setStyleSheet(f"color:{color};background:transparent;")
+        # scoped by object name: a bare rule would also paint this label's tooltip transparent
+        self.setObjectName("cut")
+        self.setStyleSheet(f"#cut{{color:{color};background:transparent;}}")
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.setText(s)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        self.setText(self.fontMetrics().elidedText(self.full, Qt.TextElideMode.ElideRight, self.width()))
+        shown = self.fontMetrics().elidedText(self.full, Qt.TextElideMode.ElideRight, self.width())
+        self.setText(shown)
+        if shown != self.full and not self.toolTip():
+            self.setToolTip(_tip(self.full))
+
+
+def _tip(s: str) -> str:
+    """Tooltip text that wraps at a readable width instead of one endless line."""
+    head, sep, rest = s.partition("\n\n")  # 'title\n\nsummary': the title in bold
+    body = (f"<b>{escape(head)}</b><br><br>" if sep else escape(head)) + escape(rest).replace("\n", "<br>")
+    return f"<table width=320 cellpadding=0 cellspacing=0><tr><td>{body}</td></tr></table>" if s else ""
+
+
+class ClampLabel(QLabel):
+    """Wrapped text cut to `lines` lines with …; the whole text (or `tip`) shows on hover."""
+
+    def __init__(self, s: str, font, color: str, lines: int = 2, tip: str = ""):
+        super().__init__()
+        self.full, self.lines, self.tip = " ".join((s or "").split()), lines, tip
+        self.setFont(font)
+        # scoped by object name: a bare rule would also paint this label's tooltip transparent
+        self.setObjectName("cut")
+        self.setStyleSheet(f"#cut{{color:{color};background:transparent;}}")
+        self.setWordWrap(True)
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        # a fixed height per width, not height-for-width: the card's layouts don't propagate that
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.setText(self.full)
+        self.setFixedHeight(self._height(330))
+        if tip:
+            self.setToolTip(_tip(tip))
+
+    def _height(self, w: int) -> int:
+        fm = self.fontMetrics()
+        need = fm.boundingRect(0, 0, max(w, 1), 10_000, int(Qt.TextFlag.TextWordWrap), self.full).height()
+        return max(fm.lineSpacing(), min(need, fm.lineSpacing() * self.lines))
+
+    def _fits(self, s: str, w: int) -> bool:
+        fm = self.fontMetrics()
+        r = fm.boundingRect(0, 0, w, 10_000, int(Qt.TextFlag.TextWordWrap), s)
+        return r.height() <= fm.lineSpacing() * self.lines + 1
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        w = self.width()
+        if w <= 0:
+            return
+        shown = self.full
+        if not self._fits(shown, w):
+            lo, hi = 0, len(self.full)
+            while lo < hi:  # longest prefix that still fits with the ellipsis
+                mid = (lo + hi + 1) // 2
+                if self._fits(self.full[:mid].rstrip() + "…", w):
+                    lo = mid
+                else:
+                    hi = mid - 1
+            shown = self.full[:lo].rstrip(" ,.;:") + "…"
+        if shown != self.text():
+            self.setText(shown)
+        if self.height() != self._height(w):
+            self.setFixedHeight(self._height(w))
+        self.setToolTip(_tip(self.tip or (self.full if shown != self.full else "")))
 
 
 class StatusDot(QWidget):
@@ -553,18 +658,23 @@ class StatusDot(QWidget):
 
 
 class Promise(QWidget):
-    """An agreed item from the last call, drawn as an empty checkbox."""
+    """An agreed item from the last call: a short dash, two lines at most, the rest on hover.
+    Not a checkbox: nothing here is ticked off or written back to the CRM."""
 
     def __init__(self, s: str):
         super().__init__()
         row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
+        row.setContentsMargins(2, 0, 0, 0)
         row.setSpacing(9)
-        box = QLabel()
-        box.setFixedSize(16, 16)
-        box.setStyleSheet("border:1.5px solid #3A3F47;border-radius:5px;background:transparent;")
-        row.addWidget(box, 0, Qt.AlignmentFlag.AlignTop)
-        row.addWidget(text(s, T.sans(13), T.TEXT, wrap=True), 1)
+        mark = QLabel()
+        mark.setFixedSize(8, 2)
+        mark.setStyleSheet(f"background:{T.ACCENT};border-radius:1px;")
+        holder = QVBoxLayout()
+        holder.setContentsMargins(0, 8, 0, 0)  # level with the first text line
+        holder.addWidget(mark)
+        holder.addStretch(1)
+        row.addLayout(holder)
+        row.addWidget(ClampLabel(s, T.sans(13), T.TEXT_SOFT, lines=2), 1)
 
 
 # ------------------------------------------------------------------ errors
@@ -844,7 +954,9 @@ class TranscriptView(QScrollArea):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setStyleSheet("QScrollArea{background:transparent;} QScrollBar:vertical{width:6px;background:transparent;}"
                            f"QScrollBar::handle:vertical{{background:{T.BORDER};border-radius:3px;}}"
-                           "QScrollBar::add-line,QScrollBar::sub-line{height:0;}")
+                           "QScrollBar::add-line,QScrollBar::sub-line{height:0;}"
+                           # without this Qt fills the track with its default dotted pattern
+                           "QScrollBar::add-page,QScrollBar::sub-page{background:none;}")
         inner = QWidget()
         inner.setStyleSheet("background:transparent;")
         self.lay = QVBoxLayout(inner)
@@ -853,11 +965,18 @@ class TranscriptView(QScrollArea):
         self.lay.addStretch(1)  # rows are inserted above it: top-aligned like the mockup
         self.setWidget(inner)
         self.rows: list[QWidget] = []
+        # follow new lines while the operator is at the bottom; leave them alone once they scroll up.
+        # The range grows only after Qt lays out the wrapped text, so scroll on rangeChanged, not on add().
+        self._follow = True
+        bar = self.verticalScrollBar()
+        bar.valueChanged.connect(lambda v: setattr(self, "_follow", v >= bar.maximum() - 8))
+        bar.rangeChanged.connect(lambda _lo, hi: self._follow and bar.setValue(hi))
 
     def clear(self) -> None:
         for r in self.rows:
             r.deleteLater()
         self.rows.clear()
+        self._follow = True
 
     def add(self, t: float, speaker: str, s: str) -> None:
         row = QWidget()
@@ -880,7 +999,6 @@ class TranscriptView(QScrollArea):
             eff = r.graphicsEffect() or QGraphicsOpacityEffect(r)
             eff.setOpacity(1.0 if i == 0 else 0.75 if i == 1 else 0.5)
             r.setGraphicsEffect(eff)
-        QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(self.verticalScrollBar().maximum()))
 
 
 class ExpandedPanel(Card):

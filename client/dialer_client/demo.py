@@ -37,6 +37,7 @@ LINES = [(3, "operator", "Dzień dobry, EMANAGER, w czym mogę pomóc?"),
 def main() -> int:
     app = QApplication(sys.argv)
     T.load_fonts()
+    app.setStyleSheet(T.TOOLTIP_QSS)
     app.setFont(T.sans(13))
     ov = Overlay(sys.argv[2] if len(sys.argv) > 2 else "bottom-right", hint_seconds=12)
     ov.show()
@@ -60,6 +61,8 @@ def main() -> int:
                             "ticket_items": [{"number": 212, "title": "Zmiana menu na stronie", "status": "w_toku"},
                                              {"number": 215, "title": "Faktura za wrzesień", "status": "nowe"}],
                             "last_call_at": "2026-10-01", "last_call_title": "Aktualizacja cennika dostaw",
+                            "earlier_calls": [{"at": "2026-09-24", "title": "Reklamacja dostawy z 20.09"},
+                                              {"at": "2026-09-10", "title": "Pytanie o fakturę za sierpień"}],
                             "promises": ["Wysłać podgląd nowego menu", "Oddzwonić w piątek"]})
         if s in (10, 24, 32):
             ov.show_hint(HINTS[(10, 24, 32).index(s)])

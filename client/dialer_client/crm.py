@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import datetime as dt
 import json
 import logging
 import re
@@ -32,6 +33,8 @@ log = logging.getLogger("crm")
 TIMEOUT_S = 10
 CACHE_TTL_S = 600            # clients and deals are re-read every 10 minutes
 CLOSED_TICKETS = ("rozwiazane", "zamkniete")
+MIN_TALK_S = 30                # shorter calls ("Halo?", dropped at once) say nothing about the client
+EMPTY_CALL = re.compile(r"brak (treści|tresci|rozmowy|danych)", re.I)
 TEST_NAMES = re.compile(r"\btest", re.I)
 LEGAL = re.compile(r"\b(sp(o|ó)lka|sp|z|o|oo|s\.?a|sa|sc|s\.?c|ograniczona|odpowiedzialnoscia|"
                    r"odpowiedzialnością|komandytowa|jawna|ltd|gmbh|inc|firma|pphu|phu|fhu)\b", re.I)
@@ -196,6 +199,8 @@ class ClientCard:
     last_call_at: str = ""          # ISO date of the last talked-through call
     last_call_title: str = ""
     promises: list[str] = field(default_factory=list)       # what was agreed, item by item
+    last_call_summary: str = ""     # shown on hover
+    earlier_calls: list[dict] = field(default_factory=list)  # {"at", "title", "summary"}: the two calls before it
     lead_since: str = ""            # ISO date the deal was opened
 
     @property
@@ -208,7 +213,8 @@ class ClientCard:
                 "last_call": self.last_call, "promised": self.promised, "callback": self.callback,
                 "calls_count": self.calls_count, "phone": self.phone, "subscriber": self.subscriber,
                 "hours": self.hours, "ticket_items": self.ticket_items, "last_call_at": self.last_call_at,
-                "last_call_title": self.last_call_title, "promises": self.promises, "lead_since": self.lead_since}
+                "last_call_title": self.last_call_title, "promises": self.promises,
+                "last_call_summary": self.last_call_summary, "earlier_calls": self.earlier_calls, "lead_since": self.lead_since}
 
     def to_prompt(self) -> str:
         """The client block of the master prompt, in Polish."""
@@ -248,6 +254,36 @@ def _date(iso: str | None) -> str:
     return (iso or "")[:10]
 
 
+def _num(x: float) -> str:
+    return f"{x:g}"
+
+
+def _retainer_line(h: dict) -> str:
+    """Hours for Gemini. Over the limit it says so outright: the overrun moves to next month's package,
+    and that is the moment to offer a bigger one."""
+    over = h["used"] - h["limit"]
+    if over > 0:
+        return (f"Abonament {_num(h['limit'])} h/mies.: PRZEKROCZONY, wykorzystano {_num(h['used'])} h "
+                f"({_num(round(over, 1))} h ponad limit). Nadwyżka przechodzi na następny miesiąc; "
+                f"okazja, by zaproponować większy pakiet godzin")
+    return (f"Abonament: zostało {_num(h['left'])} h z {_num(h['limit'])} h w tym miesiącu "
+            f"({h['pct']}% wykorzystane)")
+
+
+def _deal_line(d: dict) -> str:
+    title = _short(d["title"], 90)
+    if d.get("contract_value") and "zł" not in title:  # titles often carry the amount already
+        title += f", {int(d['contract_value'])} zł"
+    return title
+
+
+def _talked(r: dict) -> bool:
+    """A call worth remembering: it has an AI summary, lasted a while and the summary isn't 'nothing to analyse'."""
+    if not r.get("ai_summary") or EMPTY_CALL.search(r.get("title") or ""):
+        return False
+    return r.get("duration") is None or r["duration"] >= MIN_TALK_S
+
+
 def split_promises(s: str | None, n: int = 3) -> list[str]:
     """'1. Wysłać ofertę. 2. Oddzwonić w piątek.' -> ['Wysłać ofertę', 'Oddzwonić w piątek']."""
     s = " ".join((s or "").split())
@@ -257,7 +293,7 @@ def split_promises(s: str | None, n: int = 3) -> list[str]:
     if len([p for p in parts if p.strip()]) < 2:
         s = re.sub(r"^\d{1,2}[.)]\s+", "", s)
         parts = re.split(r"(?<=[.!?])\s+(?=[A-ZĄĆĘŁŃÓŚŹŻ])", s)
-    return [_short(p.strip().rstrip("."), 90) for p in parts if p.strip()][:n]
+    return [_short(p.strip().rstrip("."), 300) for p in parts if p.strip()][:n]
 
 
 class Crm:
@@ -387,11 +423,12 @@ class Crm:
     def _fill(self, card: ClientCard, deals: list[dict], n: str) -> None:
         ids = card.client_ids
         open_deals = deals + [d for d in self.deals if d.get("client_id") in ids and d not in deals]
-        card.deals = [_short(d["title"], 60) + (f", {int(d['contract_value'])} zł" if d.get("contract_value") else "")
-                      for d in open_deals[:3]]
+        card.deals = [_deal_line(d) for d in open_deals[:3]]
         nxt = next((d for d in open_deals if d.get("next_contact_date")), None)
         if nxt:
-            card.callback = f"Następny kontakt {_date(nxt['next_contact_date'])}: {_short(nxt.get('next_contact_note'), 60)}"
+            day = _date(nxt["next_contact_date"])
+            what = "Zaległy kontakt, planowany" if day < dt.date.today().isoformat() else "Następny kontakt"
+            card.callback = f"{what} {day}: {_short(nxt.get('next_contact_note'), 300)}"
         for cid in ids:
             c = self.clients[cid]
             card.subscriber = card.subscriber or bool(c.get("has_retainer") or c.get("monthly_hours_limit"))
@@ -401,8 +438,7 @@ class Crm:
                     if u.get("limit_godzin") and not card.hours:
                         card.hours = {"limit": float(u["limit_godzin"]), "left": float(u.get("zostalo_godzin") or 0),
                                       "used": float(u.get("zuzyte_godzin") or 0), "pct": int(u.get("procent") or 0)}
-                        card.retainer = (f"Abonament: zostało {u.get('zostalo_godzin')} h z {u.get('limit_godzin')} h "
-                                         f"w tym miesiącu ({u.get('procent')}% wykorzystane)")
+                        card.retainer = _retainer_line(card.hours)
                 except CrmError as e:
                     log.info("usage unavailable: %s", e)
             elif c.get("has_retainer") and not card.retainer:
@@ -434,22 +470,25 @@ class Crm:
         if not conds:
             return
         try:
-            rows = self.sb.select("calls", select="called_at,direction,title,ai_summary,suggestions,callback_status",
-                                  **{"or": f"({','.join(conds)})"}, deleted_at="is.null",
-                                  order="called_at.desc.nullslast", limit="8")
+            rows = self.sb.select("calls", select="called_at,direction,duration,title,ai_summary,suggestions,"
+                                  "callback_status", **{"or": f"({','.join(conds)})"}, deleted_at="is.null",
+                                  order="called_at.desc.nullslast", limit="25")
         except CrmError as e:
             log.info("calls unavailable: %s", e)
             return
         card.calls_count = len(rows)
-        talked = [r for r in rows if r.get("ai_summary")]
+        talked = [r for r in rows if _talked(r)]  # skip empty and dropped calls, take the next ones instead
         if talked:
             last = talked[0]
             card.last_call = f"{_date(last['called_at'])}: {_short(last.get('title') or last['ai_summary'], 70)}"
             card.promised = _short(last.get("suggestions"), 140)
-            card.last_call_at = _date(last["called_at"])
-            card.last_call_title = _short(last.get("title") or last["ai_summary"], 70)
+            card.last_call_at = last["called_at"] or ""
+            card.last_call_title = _short(last.get("title") or last["ai_summary"], 200)
+            card.last_call_summary = _short(last["ai_summary"], 600)
             card.promises = split_promises(last.get("suggestions"))
-        if any(r.get("callback_status") == "not_started" for r in rows) and not card.callback:
+            card.earlier_calls = [{"at": r["called_at"] or "", "title": _short(r.get("title") or r["ai_summary"], 200),
+                                   "summary": _short(r["ai_summary"], 600)} for r in talked[1:3]]
+        if any(r.get("callback_status") == "not_started" for r in rows[:8]) and not card.callback:
             card.callback = "Nieoddzwoniony nieodebrany telefon"
         card.history = [f"{_date(r['called_at'])} ({'przych.' if r.get('direction') == 'inbound' else 'wych.'}): "
                         f"{_short(r.get('title'), 80)}. {_short(r.get('ai_summary'), 300)} "

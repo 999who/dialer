@@ -53,6 +53,11 @@ SANS = "Geist"
 SERIF = "Source Serif 4"
 
 
+# hover text for cut-off card lines: dark like the card, wide enough for a call summary
+TOOLTIP_QSS = (f"QToolTip{{background:{SURFACE2};color:{TEXT};border:1px solid {BORDER_SOFT};"
+               "border-radius:8px;padding:8px 10px;font-size:13px;opacity:255;}")
+
+
 def load_fonts() -> None:
     global SANS, SERIF
     fams = set()

@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from dialer_client.crm import Crm, CrmError, name_tokens, normalize_phone, split_promises  # noqa: E402
+from dialer_client.crm import Crm, CrmError, _deal_line, _retainer_line, name_tokens, normalize_phone, split_promises  # noqa: E402
 
 CLIENTS = [
     {"id": "c1", "name": "Floresca", "phone": "+48 509 506 219", "status": "active", "has_retainer": True,
@@ -21,7 +21,7 @@ DEALS = [
     {"id": "d1", "title": "Sklepy cmentarne", "client_id": None, "contact_phone": "509506219",
      "deal_status": "open", "contract_value": None, "next_contact_date": None, "next_contact_note": None},
     {"id": "d2", "title": "Squash Point kampanie", "client_id": "c3", "contact_phone": "+48 783 068 607",
-     "deal_status": "open", "contract_value": 1500, "next_contact_date": "2026-10-10T09:00:00+00:00",
+     "deal_status": "open", "contract_value": 1500, "next_contact_date": "2099-10-10T09:00:00+00:00",
      "next_contact_note": "Wysłać raport"},
     {"id": "d3", "title": "Soforek.pl - Dorota Leśniewska", "client_id": None, "contact_phone": "606 833 032",
      "deal_status": "open", "contract_value": None, "next_contact_date": None, "next_contact_note": None},
@@ -89,7 +89,7 @@ def test_client_by_contact_and_own_phone_with_details():
     assert card.last_call.startswith("2026-10-01") and card.promised == "1. Wysłać ofertę."
     assert card.subscriber and card.hours == {"limit": 10.0, "left": 3.5, "used": 6.5, "pct": 65}
     assert card.ticket_items == [{"number": 7, "title": "Strona nie działa", "status": "w_toku"}]
-    assert card.last_call_at == "2026-10-01" and card.promises == ["Wysłać ofertę"]
+    assert card.last_call_at.startswith("2026-10-01T10:00") and card.promises == ["Wysłać ofertę"]
     prompt = card.to_prompt()
     assert "Firma / klient: Floresca" in prompt and "Poprzednie rozmowy" in prompt
 
@@ -97,7 +97,7 @@ def test_client_by_contact_and_own_phone_with_details():
 def test_one_number_two_companies_shows_both():
     card = crm().by_phone("783068607")
     assert card.kind == "client" and card.title == 'FIRFAS RAFAŁ "FIRFEK" / Squashpoint'
-    assert card.callback.startswith("Następny kontakt 2026-10-10")
+    assert card.callback.startswith("Następny kontakt 2099-10-10")
 
 
 def test_test_clients_and_own_numbers_are_ignored():
@@ -173,3 +173,25 @@ def test_crm_address_is_built_in(tmp_path):
     assert (c.crm_url, c.crm_key) == (CRM_URL, CRM_KEY)
     cfg.write_text('crm_url = "https://other.supabase.co/"\ncrm_key = "sb_publishable_x"\n')
     assert load_config(cfg).crm_url == "https://other.supabase.co"
+
+
+def test_prompt_lines_for_hours_over_limit_and_overdue_contact():
+    over = _retainer_line({"limit": 10.0, "used": 20.4, "left": 0.0, "pct": 204})
+    assert "PRZEKROCZONY" in over and "10.4 h ponad limit" in over and "większy pakiet" in over
+    assert _retainer_line({"limit": 10.0, "used": 6.5, "left": 3.5, "pct": 65}).startswith(
+        "Abonament: zostało 3.5 h z 10 h")
+    assert _deal_line({"title": "Kiosk na hali (29 000 zł)", "contract_value": 29000}) == "Kiosk na hali (29 000 zł)"
+    assert _deal_line({"title": "Sklep", "contract_value": 1500}) == "Sklep, 1500 zł"
+    c = crm()
+    c.refresh_cache()
+    c.deals = [dict(d, next_contact_date="2020-01-01T09:00:00+00:00") for d in c.deals]  # copies: DEALS is shared
+    card = c.by_phone("783068607")
+    assert card.callback.startswith("Zaległy kontakt, planowany 2020-01-01")
+
+
+def test_empty_and_dropped_calls_are_skipped():
+    from dialer_client.crm import _talked
+    assert not _talked({"ai_summary": "x", "title": "Brak treści do analizy", "duration": 120})
+    assert not _talked({"ai_summary": "Halo?", "title": "Próba połączenia", "duration": 10})
+    assert not _talked({"ai_summary": None, "title": "Oferta", "duration": 300})
+    assert _talked({"ai_summary": "Ustalono ofertę.", "title": "Oferta", "duration": 178})

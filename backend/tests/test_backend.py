@@ -164,7 +164,7 @@ def test_session_coalesces_and_dedupes():
 
 def test_session_reports_gemini_errors_to_the_operator():
     class BrokenLLM(FakeLLM):
-        async def decide(self, rag_context, last_hint, history):
+        async def decide(self, rag_context, last_hint, history, client_context=""):
             raise RuntimeError("API key not valid")
 
     async def go():

@@ -727,6 +727,7 @@ def main() -> int:
     log_path = _setup_logging()
     log.info("log file: %s, config: %s", log_path, CONFIG_PATH)
     T.load_fonts()
+    app.setStyleSheet(T.TOOLTIP_QSS)
     app.setFont(T.sans(13))
     app.setWindowIcon(T.app_icon())
 
