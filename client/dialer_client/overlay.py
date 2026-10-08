@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 
 from PyQt6.QtCore import QPoint, Qt, QTimer, pyqtSignal
-from PyQt6.QtWidgets import QApplication, QGraphicsOpacityEffect, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QGraphicsOpacityEffect, QHBoxLayout, QVBoxLayout, QWidget
 
 from . import theme as T
 from .widgets import Card, ClientCard, ErrorCard, ExpandedPanel, HintCard, StatusBar, SummaryCard
@@ -83,6 +83,19 @@ class Overlay(QWidget):
         self.bar = StatusBar()
         self.panel = ExpandedPanel(opacity)
         self.panel.hide()
+        # expanded: [client card] [stack over/under the panel], the card on the side away from the screen edge
+        self.row = QWidget()
+        self.row_layout = QHBoxLayout(self.row)
+        self.row_layout.setContentsMargins(0, 0, 0, 0)
+        self.row_layout.setSpacing(T.GAP)
+        self.side = QWidget()
+        self.side_layout = QVBoxLayout(self.side)
+        self.side_layout.setContentsMargins(0, 0, 0, 0)
+        self.col = QWidget()
+        self.col_layout = QVBoxLayout(self.col)
+        self.col_layout.setContentsMargins(0, 0, 0, 0)
+        self.col_layout.setSpacing(T.GAP)
+        self.row.hide()
 
         self.bar.expand.connect(lambda: self.set_expanded(True))
         self.panel.collapse.connect(lambda: self.set_expanded(False))
@@ -98,37 +111,54 @@ class Overlay(QWidget):
 
     # ------------------------------------------------------------ layout / position
     def _layout(self) -> None:
-        for w in (self.stack_host, self.bar, self.panel):
-            self.root.removeWidget(w)
+        for lay in (self.root, self.row_layout, self.col_layout):
+            for w in (self.stack_host, self.bar, self.panel, self.row, self.side, self.col):
+                lay.removeWidget(w)
         top = self.corner.startswith("top")
         if self.expanded:
-            self.root.addWidget(self.panel)
-            if top:
-                self.root.addWidget(self.stack_host)
-            else:
-                self.root.insertWidget(0, self.stack_host)
+            for w in ((self.panel, self.stack_host) if top else (self.stack_host, self.panel)):
+                self.col_layout.addWidget(w)
+            for w in ((self.col, self.side) if self.corner.endswith("left") else (self.side, self.col)):
+                self.row_layout.addWidget(w)
+            self.root.addWidget(self.row)
         else:
             order = (self.bar, self.stack_host) if top else (self.stack_host, self.bar)
             for w in order:
                 self.root.addWidget(w)
+        self.row.setVisible(self.expanded)
         self._restack()
 
     def _restack(self) -> None:
         top = self.corner.startswith("top")
         for c in self.cards:
             self.stack.removeWidget(c)
+            self.side_layout.removeWidget(c)
+        clients = [c for c in self.cards if isinstance(c, ClientCard)]
         # newest card next to the bar; the client card is always the closest one
-        near = [c for c in self.cards if not isinstance(c, ClientCard)] + [c for c in self.cards if isinstance(c, ClientCard)]
+        # (expanded: it stands beside the panel instead)
+        near = [c for c in self.cards if not isinstance(c, ClientCard)] + ([] if self.expanded else clients)
         ordered = list(reversed(near)) if top else near
         for c in ordered:
             self.stack.addWidget(c)
+        while self.side_layout.count():  # old stretch
+            self.side_layout.takeAt(0)
+        if self.expanded:
+            # level with the panel's edge at the screen corner: bottom in a bottom corner, top in a top one
+            if not top:
+                self.side_layout.addStretch(1)
+            for c in clients:
+                self.side_layout.addWidget(c)
+            if top:
+                self.side_layout.addStretch(1)
+        self.side.setVisible(self.expanded and bool(clients))
         for i, c in enumerate(reversed(self.cards)):
             eff = c.graphicsEffect()
             if not isinstance(eff, QGraphicsOpacityEffect):
                 eff = QGraphicsOpacityEffect(c)
                 c.setGraphicsEffect(eff)
             eff.setOpacity(1.0 if i == 0 or isinstance(c, (ErrorCard, ClientCard)) else 0.45)
-        self.stack_host.setVisible(any(not (self.expanded and isinstance(c, HintCard)) for c in self.cards))
+        self.stack_host.setVisible(any(not (self.expanded and isinstance(c, (HintCard, ClientCard)))
+                                       for c in self.cards))
         QTimer.singleShot(0, self.reposition)
 
     def reposition(self) -> None:
@@ -193,6 +223,7 @@ class Overlay(QWidget):
         if card in self.cards:
             self.cards.remove(card)
             self.stack.removeWidget(card)
+            self.side_layout.removeWidget(card)
             card.deleteLater()
         if restack:
             self._restack()

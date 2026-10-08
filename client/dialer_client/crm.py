@@ -170,6 +170,14 @@ class ClientCard:
     calls_count: int = 0
     summary: str = ""               # latest AI summary of the client, for Gemini only
     history: list[str] = field(default_factory=list)  # earlier calls, for Gemini only
+    # the same facts, structured for the overlay card
+    subscriber: bool = False        # has a retainer (ABONAMENT badge)
+    hours: dict = field(default_factory=dict)   # {"limit", "used", "left", "pct"} from get_client_usage_banner
+    ticket_items: list[dict] = field(default_factory=list)  # {"number", "title", "status"}
+    last_call_at: str = ""          # ISO date of the last talked-through call
+    last_call_title: str = ""
+    promises: list[str] = field(default_factory=list)       # what was agreed, item by item
+    lead_since: str = ""            # ISO date the deal was opened
 
     @property
     def found(self) -> bool:
@@ -179,7 +187,9 @@ class ClientCard:
         return {"title": self.title, "person": self.person, "kind": self.kind, "via": self.via,
                 "retainer": self.retainer, "tickets": self.tickets, "deals": self.deals,
                 "last_call": self.last_call, "promised": self.promised, "callback": self.callback,
-                "calls_count": self.calls_count}
+                "calls_count": self.calls_count, "phone": self.phone, "subscriber": self.subscriber,
+                "hours": self.hours, "ticket_items": self.ticket_items, "last_call_at": self.last_call_at,
+                "last_call_title": self.last_call_title, "promises": self.promises, "lead_since": self.lead_since}
 
     def to_prompt(self) -> str:
         """The client block of the master prompt, in Polish."""
@@ -219,6 +229,18 @@ def _date(iso: str | None) -> str:
     return (iso or "")[:10]
 
 
+def split_promises(s: str | None, n: int = 3) -> list[str]:
+    """'1. Wysłać ofertę. 2. Oddzwonić w piątek.' -> ['Wysłać ofertę', 'Oddzwonić w piątek']."""
+    s = " ".join((s or "").split())
+    if not s:
+        return []
+    parts = re.split(r"(?:^|\s)\d{1,2}[.)]\s+", s)
+    if len([p for p in parts if p.strip()]) < 2:
+        s = re.sub(r"^\d{1,2}[.)]\s+", "", s)
+        parts = re.split(r"(?<=[.!?])\s+(?=[A-ZĄĆĘŁŃÓŚŹŻ])", s)
+    return [_short(p.strip().rstrip("."), 90) for p in parts if p.strip()][:n]
+
+
 class Crm:
     """Lookups for the card. Small tables are cached (clients, deals, contact persons) because
     their phone formats vary ("+48 501 135 008", "501135008") and are matched here."""
@@ -242,7 +264,7 @@ class Crm:
         try:
             self.deals = self.sb.select(
                 "crm_deals", select="id,title,client_id,contact_phone,deal_status,contract_value,"
-                "next_contact_date,next_contact_note", is_archived="eq.false", is_demo="eq.false")
+                "next_contact_date,next_contact_note,created_at", is_archived="eq.false", is_demo="eq.false")
         except CrmError as e:  # no access to the sales pipeline: the card works without deals
             log.info("deals unavailable: %s", e)
             self.deals = []
@@ -303,6 +325,7 @@ class Crm:
         elif deals:
             card.kind = "lead"
             card.title = deals[0]["title"]
+            card.lead_since = _date(deals[0].get("created_at"))
         else:
             contacts = self.sb.select("contacts", select="first_name,last_name,organization",
                                       phone_key=f"eq.{n}", limit="5")
@@ -337,7 +360,7 @@ class Crm:
             return card
         deal = max(self.deals, key=lambda d: score(d["title"]), default=None)
         if deal and score(deal["title"]) > 0:
-            card.kind, card.title = "lead", deal["title"]
+            card.kind, card.title, card.lead_since = "lead", deal["title"], _date(deal.get("created_at"))
             self._fill(card, [deal], normalize_phone(deal.get("contact_phone")))
         return card
 
@@ -352,10 +375,13 @@ class Crm:
             card.callback = f"Następny kontakt {_date(nxt['next_contact_date'])}: {_short(nxt.get('next_contact_note'), 60)}"
         for cid in ids:
             c = self.clients[cid]
+            card.subscriber = card.subscriber or bool(c.get("has_retainer") or c.get("monthly_hours_limit"))
             if c.get("monthly_hours_limit"):
                 try:
                     u = self.sb.rpc("get_client_usage_banner", {"_client_id": cid}) or {}
-                    if u.get("limit_godzin"):
+                    if u.get("limit_godzin") and not card.hours:
+                        card.hours = {"limit": float(u["limit_godzin"]), "left": float(u.get("zostalo_godzin") or 0),
+                                      "used": float(u.get("zuzyte_godzin") or 0), "pct": int(u.get("procent") or 0)}
                         card.retainer = (f"Abonament: zostało {u.get('zostalo_godzin')} h z {u.get('limit_godzin')} h "
                                          f"w tym miesiącu ({u.get('procent')}% wykorzystane)")
                 except CrmError as e:
@@ -369,6 +395,8 @@ class Crm:
                                       order="last_message_at.desc.nullslast", limit="3")
                 card.tickets += [f"#{r['ticket_number']} {_short(r['title'], 50)} ({r['status'].replace('_', ' ')})"
                                  for r in rows]
+                card.ticket_items += [{"number": r["ticket_number"], "title": r["title"] or "", "status": r["status"]}
+                                      for r in rows]
             except CrmError as e:
                 log.info("tickets unavailable: %s", e)
             try:
@@ -399,6 +427,9 @@ class Crm:
             last = talked[0]
             card.last_call = f"{_date(last['called_at'])}: {_short(last.get('title') or last['ai_summary'], 70)}"
             card.promised = _short(last.get("suggestions"), 140)
+            card.last_call_at = _date(last["called_at"])
+            card.last_call_title = _short(last.get("title") or last["ai_summary"], 70)
+            card.promises = split_promises(last.get("suggestions"))
         if any(r.get("callback_status") == "not_started" for r in rows) and not card.callback:
             card.callback = "Nieoddzwoniony nieodebrany telefon"
         card.history = [f"{_date(r['called_at'])} ({'przych.' if r.get('direction') == 'inbound' else 'wych.'}): "

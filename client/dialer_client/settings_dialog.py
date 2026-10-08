@@ -36,7 +36,7 @@ class SettingsDialog(QDialog):
     def __init__(self, cfg, reason: str = "", parent=None, on_check_updates=None):
         super().__init__(parent)
         self.setWindowTitle("EMANAGER Dialer · ustawienia")
-        self.setWindowIcon(T.icon("logo_full", T.BRAND, 64))
+        self.setWindowIcon(T.app_icon())
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.setMinimumWidth(500)
         self.setStyleSheet(

@@ -63,6 +63,7 @@ class DialerApp(QObject):
         self.bridge.crm.connect(self._on_crm_event)
         self.crm: Crm | None = None        # set once the operator is signed in
         self.operator = ""                 # their name, for the menu and the log
+        self.crm_remember = True           # keep the CRM session across restarts ("Zapamiętaj mnie")
         self.card = None                   # ClientCard of the current call
         self._call_seq = 0                 # a lookup for an earlier call must not land on this one
         self._release = None
@@ -127,7 +128,7 @@ class DialerApp(QObject):
             self.overlay.show_error("no_audio", str(e)[:40])
 
     def _setup_tray(self) -> None:
-        self.tray = QSystemTrayIcon(T.icon("logo_full", T.BRAND, 32), self)
+        self.tray = QSystemTrayIcon(T.app_icon(), self)
         self.tray.setToolTip("EMANAGER Dialer")
         self.tray.activated.connect(lambda *_: (self.overlay.showNormal(), self.overlay.reposition()))
         menu = QMenu()
@@ -430,6 +431,9 @@ class DialerApp(QObject):
                 save_values(conn)
             except OSError as e:
                 log.error("cannot save %s: %s", CONFIG_PATH, e)
+        self.crm_remember = dlg.remember.isChecked()
+        if not self.crm_remember:
+            self.qs.remove("crm/refresh_token")
         self._on_crm_event("signed_in", dlg.sb)
 
     def _account_action(self) -> None:
@@ -483,7 +487,8 @@ class DialerApp(QObject):
         if event == "signed_in":
             sb: Supabase = payload
             sb.on_session = lambda s: self.bridge.crm.emit("token", s.refresh_token)
-            self.qs.setValue("crm/refresh_token", sb.session.refresh_token)
+            if self.crm_remember:  # otherwise the session lives only until the app closes
+                self.qs.setValue("crm/refresh_token", sb.session.refresh_token)
             self.qs.setValue("crm/email", sb.session.email)
             self.crm = Crm(sb, [n for n in self.cfg.own_numbers.split(",") if n.strip()])
             self.operator = sb.session.email
@@ -496,7 +501,7 @@ class DialerApp(QObject):
 
             self._crm_worker("profile", warm)
         elif event == "token":
-            if self.crm:
+            if self.crm and self.crm_remember:
                 self.qs.setValue("crm/refresh_token", payload)
         elif event == "profile":
             self.operator = payload.get("full_name") or self.operator
@@ -696,7 +701,7 @@ def main() -> int:
     log.info("log file: %s, config: %s", log_path, CONFIG_PATH)
     T.load_fonts()
     app.setFont(T.sans(13))
-    app.setWindowIcon(T.icon("logo_full", T.BRAND, 256))
+    app.setWindowIcon(T.app_icon())
 
     global _lock
     lock = _lock = QLockFile(QDir.temp().filePath("emanager_dialer.lock"))

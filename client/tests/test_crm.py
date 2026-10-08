@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from dialer_client.crm import Crm, CrmError, name_tokens, normalize_phone  # noqa: E402
+from dialer_client.crm import Crm, CrmError, name_tokens, normalize_phone, split_promises  # noqa: E402
 
 CLIENTS = [
     {"id": "c1", "name": "Floresca", "phone": "+48 509 506 219", "status": "active", "has_retainer": True,
@@ -63,7 +63,7 @@ class FakeSupabase:
     def rpc(self, fn, args=None):
         self.calls.append((fn, args))
         if fn == "get_client_usage_banner":
-            return {"limit_godzin": 10, "zostalo_godzin": 3.5, "procent": 65}
+            return {"limit_godzin": 10, "zostalo_godzin": 3.5, "zuzyte_godzin": 6.5, "procent": 65}
         if fn == "dialer_current_call":
             raise CrmError("Could not find the function", 404, "PGRST202")
         return None
@@ -87,6 +87,9 @@ def test_client_by_contact_and_own_phone_with_details():
     assert card.tickets == ["#7 Strona nie działa (w toku)"]
     assert card.deals[0].startswith("Sklepy cmentarne")       # the deal without a client rides along
     assert card.last_call.startswith("2026-10-01") and card.promised == "1. Wysłać ofertę."
+    assert card.subscriber and card.hours == {"limit": 10.0, "left": 3.5, "used": 6.5, "pct": 65}
+    assert card.ticket_items == [{"number": 7, "title": "Strona nie działa", "status": "w_toku"}]
+    assert card.last_call_at == "2026-10-01" and card.promises == ["Wysłać ofertę"]
     prompt = card.to_prompt()
     assert "Firma / klient: Floresca" in prompt and "Poprzednie rozmowy" in prompt
 
@@ -130,3 +133,10 @@ def test_unknown_number_still_brings_its_call_history():
     card = crm().by_phone("500000000")
     assert card.kind == "unknown" and card.calls_count == 1
     assert "Poprzednie rozmowy" in card.to_prompt()
+
+
+def test_split_promises():
+    assert split_promises("1. Wysłać ofertę. 2. Oddzwonić w piątek.") == ["Wysłać ofertę", "Oddzwonić w piątek"]
+    assert split_promises("Klient ustali datę. Należy pamiętać o promocji.") == [
+        "Klient ustali datę", "Należy pamiętać o promocji"]
+    assert split_promises(None) == []

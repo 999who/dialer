@@ -55,11 +55,12 @@ def main() -> int:
                 ov.add_transcript(at, who, txt)
         if s == 2:
             ov.show_client({"kind": "client", "via": "number", "title": "Pizzeria Osielsko",
-                            "person": "Aldona (właścicielka)",
-                            "retainer": "Abonament: zostało 3.5 h z 10 h w tym miesiącu (65% wykorzystane)",
-                            "tickets": ["#212 Zmiana menu na stronie (w toku)"],
-                            "last_call": "2026-10-01: Aktualizacja cennika dostaw",
-                            "promised": "Wysłać podgląd nowego menu do piątku."})
+                            "person": "Aldona (właścicielka)", "subscriber": True,
+                            "hours": {"limit": 10, "left": 3.5, "used": 6.5, "pct": 65},
+                            "ticket_items": [{"number": 212, "title": "Zmiana menu na stronie", "status": "w_toku"},
+                                             {"number": 215, "title": "Faktura za wrzesień", "status": "nowe"}],
+                            "last_call_at": "2026-10-01", "last_call_title": "Aktualizacja cennika dostaw",
+                            "promises": ["Wysłać podgląd nowego menu", "Oddzwonić w piątek"]})
         if s in (10, 24, 32):
             ov.show_hint(HINTS[(10, 24, 32).index(s)])
             ov.set_latency(random.randint(1500, 2300))

@@ -1,4 +1,4 @@
-"""Renders the EMANAGER logo into assets/icon.ico (exe and taskbar icon).
+"""Renders the EMANAGER app tile (red logo on a dark tile) into assets/icon.ico (exe and taskbar icon).
 
     python tools/make_icon.py      # needs PyQt6 and Pillow
 """
@@ -16,11 +16,18 @@ from PyQt6.QtGui import QGuiApplication  # noqa: E402
 from dialer_client import theme as T  # noqa: E402
 
 app = QGuiApplication(sys.argv)
-pm = T.pixmap("logo_full", T.BRAND, 256, dpr=1.0)
-buf = QBuffer()
-buf.open(QIODevice.OpenModeFlag.WriteOnly)
-pm.save(buf, "PNG")
-img = Image.open(io.BytesIO(bytes(buf.data())))
+SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
+
+
+def png(size: int) -> Image.Image:
+    buf = QBuffer()
+    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+    T.app_tile(size).save(buf, "PNG")
+    return Image.open(io.BytesIO(bytes(buf.data()))).convert("RGBA")
+
+
+# each size drawn on its own (the small ones use the simpler marks), not scaled down from 256
+imgs = [png(s) for s in SIZES]
 out = ROOT / "assets" / "icon.ico"
-img.save(out, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+imgs[-1].save(out, sizes=[(s, s) for s in SIZES], append_images=imgs[:-1])
 print(out)
