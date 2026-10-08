@@ -20,7 +20,7 @@ server -> client
   {"type":"latency","ms":1650}
   {"type":"caller","text":"Marek, Bipromasz"}   # who the caller said they are (for a CRM lookup by name)
   {"type":"call_summary","duration_s":468,"summary":"…","hints":5,"used":3,"objections":2}
-  {"type":"error","code":"auth|bad_format","message":"…"}
+  {"type":"error","code":"auth|bad_format|llm","message":"…"}   # llm: Gemini call failed, no hint
 """
 from __future__ import annotations
 

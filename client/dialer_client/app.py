@@ -317,6 +317,8 @@ class DialerApp(QObject):
             self.overlay.show_summary(m)
         elif t == "error":
             log.error("backend: %s", m)
+            if m.get("code") == "llm":
+                self.overlay.show_error("no_llm", str(m.get("message", ""))[:40])
 
     # ---------------------------------------------------------------- actions
     def _on_error_action(self, kind: str) -> None:
