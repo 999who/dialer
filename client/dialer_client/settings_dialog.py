@@ -52,7 +52,7 @@ class SettingsDialog(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 18)
         root.setSpacing(12)
-        title = QLabel("Podpowiedzi Gemini")
+        title = QLabel("Gemini API KEY")
         title.setFont(T.sans(15, 700))
         root.addWidget(title)
         if reason:
@@ -71,7 +71,7 @@ class SettingsDialog(QDialog):
         self.model_box.addItems(GEMINI_MODELS if cfg.gemini_model in GEMINI_MODELS
                                 else [cfg.gemini_model] + GEMINI_MODELS)
         self.model_box.setCurrentText(cfg.gemini_model)
-        form.addRow("Klucz Gemini API", self.key_edit)
+        form.addRow("Klucz", self.key_edit)
         form.addRow("Model", self.model_box)
         root.addLayout(form)
         how = QLabel(f'Klucz: <a style="color:{T.ACCENT};" href="https://aistudio.google.com/apikey">'
@@ -82,14 +82,14 @@ class SettingsDialog(QDialog):
         how.setStyleSheet(f"color:{T.MUTED};")
         root.addWidget(how)
 
-        db_title = QLabel("Baza wiedzy (Supabase, opcjonalnie)")
+        db_title = QLabel("Supabase URI")
         db_title.setFont(T.sans(13, 700))
         root.addWidget(db_title)
         self.db_edit = QLineEdit(cfg.database_url)
         self.db_edit.setPlaceholderText("postgresql://postgres.…:hasło@…pooler.supabase.com:6543/postgres")
         self.db_edit.setEchoMode(QLineEdit.EchoMode.Password)
         root.addWidget(self.db_edit)
-        db_how = QLabel("Supabase → Connect → Transaction pooler → URI (z hasłem). Puste = podpowiedzi bez bazy "
+        db_how = QLabel("Opcjonalnie. Supabase → Connect → Transaction pooler → URI (z hasłem). Puste = podpowiedzi bez bazy "
                         "wiedzy i bez zapisu rozmów.")
         db_how.setWordWrap(True)
         db_how.setStyleSheet(f"color:{T.MUTED};")

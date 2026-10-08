@@ -39,8 +39,9 @@ class Bridge(QObject):
 
 
 class DialerApp(QObject):
-    def __init__(self, cfg: Config, local: LocalServer, audio_factory=None):
+    def __init__(self, cfg: Config, local: LocalServer, audio_factory=None, first_login=None):
         super().__init__()
+        self.first_login = first_login  # (sb or None, remember) when main() already asked to sign in
         self.cfg = cfg
         self.local = local
         self.qs = QSettings("EMANAGER", "Dialer")
@@ -407,6 +408,12 @@ class DialerApp(QObject):
         threading.Thread(target=work, name=f"crm-{name}", daemon=True).start()
 
     def _crm_startup(self) -> None:
+        if self.first_login is not None:  # the sign-in window was shown before the app
+            sb, self.crm_remember = self.first_login
+            self.first_login = None
+            if sb is not None:
+                self._on_crm_event("signed_in", sb)
+            return
         token = self.qs.value("crm/refresh_token", "")
         if not (self.cfg.crm_url and self.cfg.crm_key and token):
             QTimer.singleShot(300, self.crm_login)
@@ -425,21 +432,11 @@ class DialerApp(QObject):
         self._crm_worker("resume", resume)
 
     def crm_login(self, reason: str = "") -> None:
-        dlg = LoginDialog(self.cfg, self.qs.value("crm/email", ""), reason)
-        if dlg.exec() != QDialog.DialogCode.Accepted or dlg.sb is None:
+        sb, remember = sign_in(self.cfg, self.qs, reason)
+        if sb is None:
             return
-        conn = dlg.connection()
-        if conn != {k: getattr(self.cfg, k) for k in conn}:
-            for k, v in conn.items():
-                setattr(self.cfg, k, v)
-            try:
-                save_values(conn)
-            except OSError as e:
-                log.error("cannot save %s: %s", CONFIG_PATH, e)
-        self.crm_remember = dlg.remember.isChecked()
-        if not self.crm_remember:
-            self.qs.remove("crm/refresh_token")
-        self._on_crm_event("signed_in", dlg.sb)
+        self.crm_remember = remember
+        self._on_crm_event("signed_in", sb)
 
     def _account_action(self) -> None:
         if not self.crm:
@@ -644,6 +641,25 @@ class DialerApp(QObject):
 _lock: QLockFile | None = None
 
 
+def sign_in(cfg: Config, qs: QSettings, reason: str = "") -> tuple[Supabase | None, bool]:
+    """CRM sign-in window; (session or None when skipped, 'Zapamiętaj mnie')."""
+    dlg = LoginDialog(cfg, qs.value("crm/email", ""), reason)
+    if dlg.exec() != QDialog.DialogCode.Accepted or dlg.sb is None:
+        return None, True
+    conn = dlg.connection()
+    if conn != {k: getattr(cfg, k) for k in conn}:
+        for k, v in conn.items():
+            setattr(cfg, k, v)
+        try:
+            save_values(conn)
+        except OSError as e:
+            log.error("cannot save %s: %s", CONFIG_PATH, e)
+    remember = dlg.remember.isChecked()
+    if not remember:
+        qs.remove("crm/refresh_token")
+    return dlg.sb, remember
+
+
 def ask_settings(cfg: Config, reason: str = "", on_check_updates=None) -> bool:
     """Settings window; on OK updates cfg and config.toml."""
     dlg = SettingsDialog(cfg, reason, on_check_updates=on_check_updates)
@@ -719,11 +735,15 @@ def main() -> int:
     updater.cleanup()
     log.info("version %s", updater.version_label())
     cfg = load_config()
+    # first run, one window at a time: sign-in, then the keys, then the app
+    first_login = None
+    if not QSettings("EMANAGER", "Dialer").value("crm/refresh_token", ""):
+        first_login = sign_in(cfg, QSettings("EMANAGER", "Dialer"))
     if needs_setup(cfg):
         ask_settings(cfg)
     local = LocalServer(cfg)
     local.start()
     app.aboutToQuit.connect(local.stop)
-    dialer = DialerApp(cfg, local)
+    dialer = DialerApp(cfg, local, first_login=first_login)
     dialer.start()
     return app.exec()
