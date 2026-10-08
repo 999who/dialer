@@ -50,8 +50,8 @@ EmanagerDialer.exe на ПК оператора                                 
 
 1. Скачайте [EmanagerDialer.exe](https://github.com/999who/dialer/releases/download/client-latest/EmanagerDialer.exe)
    (собирается автоматически из `main`), положите в любую папку и запустите.
-2. В окне «Podpowiedzi Gemini» вставьте ключ с [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
-   и нажмите «Sprawdź i zapisz». Ключ и модель сохраняются в `config.toml` рядом с exe, поменять их потом
+2. Сначала войдите в CRM своим логином и паролем. Затем в окне «Gemini API KEY» вставьте ключ с [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+   (поле «Supabase URI» можно оставить пустым) и нажмите «Sprawdź i zapisz». Только после этого открывается оверлей. Ключ и модель сохраняются в `config.toml` рядом с exe, поменять их потом
    можно через логотип на панели → «Ustawienia (klucz Gemini)».
 3. При первом запуске exe скачает модель распознавания Parakeet (~670 МБ) в кэш Hugging Face, пока на
    оверлее висит карточка «Przygotowanie rozpoznawania mowy». Следующие запуски занимают 10–20 с.
