@@ -254,12 +254,13 @@ def _num(x: float) -> str:
 
 
 def _retainer_line(h: dict) -> str:
-    """Hours for Gemini. Over the limit it says so outright: that is when a 'small extra' must be quoted."""
+    """Hours for Gemini. Over the limit it says so outright: the overrun moves to next month's package,
+    and that is the moment to offer a bigger one."""
     over = h["used"] - h["limit"]
     if over > 0:
         return (f"Abonament {_num(h['limit'])} h/mies.: PRZEKROCZONY, wykorzystano {_num(h['used'])} h "
-                f"({_num(round(over, 1))} h ponad limit). Każda nowa praca w tym miesiącu tylko po wycenie "
-                f"lub rozszerzeniu pakietu")
+                f"({_num(round(over, 1))} h ponad limit). Nadwyżka przechodzi na następny miesiąc; "
+                f"okazja, by zaproponować większy pakiet godzin")
     return (f"Abonament: zostało {_num(h['left'])} h z {_num(h['limit'])} h w tym miesiącu "
             f"({h['pct']}% wykorzystane)")
 

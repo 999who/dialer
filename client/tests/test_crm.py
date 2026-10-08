@@ -177,7 +177,7 @@ def test_crm_address_is_built_in(tmp_path):
 
 def test_prompt_lines_for_hours_over_limit_and_overdue_contact():
     over = _retainer_line({"limit": 10.0, "used": 20.4, "left": 0.0, "pct": 204})
-    assert "PRZEKROCZONY" in over and "10.4 h ponad limit" in over and "po wycenie" in over
+    assert "PRZEKROCZONY" in over and "10.4 h ponad limit" in over and "większy pakiet" in over
     assert _retainer_line({"limit": 10.0, "used": 6.5, "left": 3.5, "pct": 65}).startswith(
         "Abonament: zostało 3.5 h z 10 h")
     assert _deal_line({"title": "Kiosk na hali (29 000 zł)", "contract_value": 29000}) == "Kiosk na hali (29 000 zł)"
