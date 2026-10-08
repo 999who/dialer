@@ -199,6 +199,7 @@ class ClientCard:
     last_call_at: str = ""          # ISO date of the last talked-through call
     last_call_title: str = ""
     promises: list[str] = field(default_factory=list)       # what was agreed, item by item
+    earlier_calls: list[dict] = field(default_factory=list)  # {"at", "title"}: the two talked calls before the last
     lead_since: str = ""            # ISO date the deal was opened
 
     @property
@@ -211,7 +212,8 @@ class ClientCard:
                 "last_call": self.last_call, "promised": self.promised, "callback": self.callback,
                 "calls_count": self.calls_count, "phone": self.phone, "subscriber": self.subscriber,
                 "hours": self.hours, "ticket_items": self.ticket_items, "last_call_at": self.last_call_at,
-                "last_call_title": self.last_call_title, "promises": self.promises, "lead_since": self.lead_since}
+                "last_call_title": self.last_call_title, "promises": self.promises,
+                "earlier_calls": self.earlier_calls, "lead_since": self.lead_since}
 
     def to_prompt(self) -> str:
         """The client block of the master prompt, in Polish."""
@@ -482,6 +484,8 @@ class Crm:
             card.last_call_at = last["called_at"] or ""
             card.last_call_title = _short(last.get("title") or last["ai_summary"], 70)
             card.promises = split_promises(last.get("suggestions"))
+            card.earlier_calls = [{"at": r["called_at"] or "", "title": _short(r.get("title") or r["ai_summary"], 70)}
+                                  for r in talked[1:3]]
         if any(r.get("callback_status") == "not_started" for r in rows[:8]) and not card.callback:
             card.callback = "Nieoddzwoniony nieodebrany telefon"
         card.history = [f"{_date(r['called_at'])} ({'przych.' if r.get('direction') == 'inbound' else 'wych.'}): "

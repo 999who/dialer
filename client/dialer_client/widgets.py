@@ -457,7 +457,9 @@ class ClientCard(Card):
         if data.get("last_call_at"):
             when = _when(data["last_call_at"])
             ago = _ago(data["last_call_at"])
-            sec = self._section("OSTATNIA ROZMOWA", "", "" if when.split(",")[0] in (ago, *WEEKDAYS) else ago)
+            earlier = data.get("earlier_calls") or []
+            sec = self._section("OSTATNIE ROZMOWY" if earlier else "OSTATNIA ROZMOWA", "",
+                                "" if when.split(",")[0] in (ago, *WEEKDAYS) else ago)
             line = QLabel(f'<span style="color:{T.MUTED2}">{when}</span> · '
                           f'{escape(data.get("last_call_title") or "")}')
             line.setFont(T.sans(13))
@@ -466,6 +468,12 @@ class ClientCard(Card):
             sec.addWidget(line)
             for item in data.get("promises") or []:
                 sec.addWidget(Promise(item))
+            for c in earlier:  # the two before it: one line each, what it was about
+                row = QHBoxLayout()
+                row.setSpacing(6)
+                row.addWidget(text(_when(c["at"]), T.sans(12), T.MUTED2))
+                row.addWidget(ElidedLabel(c["title"], T.sans(12), T.TEXT_SOFT), 1)
+                sec.addLayout(row)
             self.body.addLayout(sec)
         if data.get("callback") or (deal and kind != "lead"):
             sec = self._section("DO ZROBIENIA")
