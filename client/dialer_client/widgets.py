@@ -6,7 +6,7 @@ from datetime import date, datetime
 from html import escape
 
 from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PyQt6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QLabel, QPushButton,
                              QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
@@ -460,28 +460,42 @@ class ClientCard(Card):
             earlier = data.get("earlier_calls") or []
             sec = self._section("OSTATNIE ROZMOWY" if earlier else "OSTATNIA ROZMOWA", "",
                                 "" if when.split(",")[0] in (ago, *WEEKDAYS) else ago)
-            line = QLabel(f'<span style="color:{T.MUTED2}">{when}</span> · '
-                          f'{escape(data.get("last_call_title") or "")}')
-            line.setFont(T.sans(13))
-            line.setStyleSheet(f"color:{T.TEXT};background:transparent;")
-            line.setWordWrap(True)
-            sec.addWidget(line)
-            for item in data.get("promises") or []:
-                sec.addWidget(Promise(item))
-            for c in earlier:  # the two before it: one line each, what it was about
-                row = QHBoxLayout()
-                row.setSpacing(6)
-                row.addWidget(text(_when(c["at"]), T.sans(12), T.MUTED2))
-                row.addWidget(ElidedLabel(c["title"], T.sans(12), T.TEXT_SOFT), 1)
-                sec.addLayout(row)
+            calls = [{"at": data["last_call_at"], "title": data.get("last_call_title") or "",
+                      "summary": data.get("last_call_summary") or ""}] + earlier
+            fm = QFontMetrics(T.sans(13))
+            when_w = max(fm.horizontalAdvance(_when(c["at"])) for c in calls) + 2  # one column for all times
+            for i, c in enumerate(calls):  # every call looks the same; only the latest lists what was agreed
+                sec.addWidget(self._call_row(c, when_w, lines=2 if i == 0 else 1))
+                if i == 0 and data.get("promises"):
+                    box = QVBoxLayout()
+                    box.setContentsMargins(0, 0, 0, 4)
+                    box.setSpacing(6)
+                    box.addWidget(text("USTALENIA", T.sans(10, 700), T.FAINT))
+                    for item in data["promises"]:
+                        box.addWidget(Promise(item))
+                    sec.addLayout(box)
             self.body.addLayout(sec)
         if data.get("callback") or (deal and kind != "lead"):
             sec = self._section("DO ZROBIENIA")
             if data.get("callback"):
-                sec.addWidget(text(data["callback"], T.sans(13), T.TEXT, wrap=True))
+                sec.addWidget(ClampLabel(data["callback"], T.sans(13), T.TEXT, lines=2))
             if deal and kind != "lead":
-                sec.addWidget(text(f"Szansa sprzedaży: {deal}", T.sans(13), T.TEXT_SOFT, wrap=True))
+                sec.addWidget(ClampLabel(f"Szansa sprzedaży: {deal}", T.sans(13), T.TEXT_SOFT, lines=2))
             self.body.addLayout(sec)
+
+    @staticmethod
+    def _call_row(c: dict, when_w: int, lines: int) -> QWidget:
+        """'wtorek, 16:46  Topic of the call', same size for every call; the AI summary on hover."""
+        w = QWidget()
+        row = QHBoxLayout(w)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        when = text(_when(c["at"]), T.sans(13), T.MUTED2)
+        when.setFixedWidth(when_w)
+        row.addWidget(when, 0, Qt.AlignmentFlag.AlignTop)
+        tip = c["title"] + (f"\n\n{c['summary']}" if c.get("summary") else "")
+        row.addWidget(ClampLabel(c["title"], T.sans(13), T.TEXT, lines=lines, tip=tip), 1)
+        return w
 
     @staticmethod
     def _sep() -> QFrame:
@@ -558,13 +572,76 @@ class ElidedLabel(QLabel):
         super().__init__()
         self.full = s
         self.setFont(font)
-        self.setStyleSheet(f"color:{color};background:transparent;")
+        # scoped by object name: a bare rule would also paint this label's tooltip transparent
+        self.setObjectName("cut")
+        self.setStyleSheet(f"#cut{{color:{color};background:transparent;}}")
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.setText(s)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        self.setText(self.fontMetrics().elidedText(self.full, Qt.TextElideMode.ElideRight, self.width()))
+        shown = self.fontMetrics().elidedText(self.full, Qt.TextElideMode.ElideRight, self.width())
+        self.setText(shown)
+        if shown != self.full and not self.toolTip():
+            self.setToolTip(_tip(self.full))
+
+
+def _tip(s: str) -> str:
+    """Tooltip text that wraps at a readable width instead of one endless line."""
+    head, sep, rest = s.partition("\n\n")  # 'title\n\nsummary': the title in bold
+    body = (f"<b>{escape(head)}</b><br><br>" if sep else escape(head)) + escape(rest).replace("\n", "<br>")
+    return f"<table width=320 cellpadding=0 cellspacing=0><tr><td>{body}</td></tr></table>" if s else ""
+
+
+class ClampLabel(QLabel):
+    """Wrapped text cut to `lines` lines with …; the whole text (or `tip`) shows on hover."""
+
+    def __init__(self, s: str, font, color: str, lines: int = 2, tip: str = ""):
+        super().__init__()
+        self.full, self.lines, self.tip = " ".join((s or "").split()), lines, tip
+        self.setFont(font)
+        # scoped by object name: a bare rule would also paint this label's tooltip transparent
+        self.setObjectName("cut")
+        self.setStyleSheet(f"#cut{{color:{color};background:transparent;}}")
+        self.setWordWrap(True)
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        # a fixed height per width, not height-for-width: the card's layouts don't propagate that
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.setText(self.full)
+        self.setFixedHeight(self._height(330))
+        if tip:
+            self.setToolTip(_tip(tip))
+
+    def _height(self, w: int) -> int:
+        fm = self.fontMetrics()
+        need = fm.boundingRect(0, 0, max(w, 1), 10_000, int(Qt.TextFlag.TextWordWrap), self.full).height()
+        return max(fm.lineSpacing(), min(need, fm.lineSpacing() * self.lines))
+
+    def _fits(self, s: str, w: int) -> bool:
+        fm = self.fontMetrics()
+        r = fm.boundingRect(0, 0, w, 10_000, int(Qt.TextFlag.TextWordWrap), s)
+        return r.height() <= fm.lineSpacing() * self.lines + 1
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        w = self.width()
+        if w <= 0:
+            return
+        shown = self.full
+        if not self._fits(shown, w):
+            lo, hi = 0, len(self.full)
+            while lo < hi:  # longest prefix that still fits with the ellipsis
+                mid = (lo + hi + 1) // 2
+                if self._fits(self.full[:mid].rstrip() + "…", w):
+                    lo = mid
+                else:
+                    hi = mid - 1
+            shown = self.full[:lo].rstrip(" ,.;:") + "…"
+        if shown != self.text():
+            self.setText(shown)
+        if self.height() != self._height(w):
+            self.setFixedHeight(self._height(w))
+        self.setToolTip(_tip(self.tip or (self.full if shown != self.full else "")))
 
 
 class StatusDot(QWidget):
@@ -581,18 +658,23 @@ class StatusDot(QWidget):
 
 
 class Promise(QWidget):
-    """An agreed item from the last call, drawn as an empty checkbox."""
+    """An agreed item from the last call: a short dash, two lines at most, the rest on hover.
+    Not a checkbox: nothing here is ticked off or written back to the CRM."""
 
     def __init__(self, s: str):
         super().__init__()
         row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
+        row.setContentsMargins(2, 0, 0, 0)
         row.setSpacing(9)
-        box = QLabel()
-        box.setFixedSize(16, 16)
-        box.setStyleSheet("border:1.5px solid #3A3F47;border-radius:5px;background:transparent;")
-        row.addWidget(box, 0, Qt.AlignmentFlag.AlignTop)
-        row.addWidget(text(s, T.sans(13), T.TEXT, wrap=True), 1)
+        mark = QLabel()
+        mark.setFixedSize(8, 2)
+        mark.setStyleSheet(f"background:{T.ACCENT};border-radius:1px;")
+        holder = QVBoxLayout()
+        holder.setContentsMargins(0, 8, 0, 0)  # level with the first text line
+        holder.addWidget(mark)
+        holder.addStretch(1)
+        row.addLayout(holder)
+        row.addWidget(ClampLabel(s, T.sans(13), T.TEXT_SOFT, lines=2), 1)
 
 
 # ------------------------------------------------------------------ errors

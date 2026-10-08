@@ -199,7 +199,8 @@ class ClientCard:
     last_call_at: str = ""          # ISO date of the last talked-through call
     last_call_title: str = ""
     promises: list[str] = field(default_factory=list)       # what was agreed, item by item
-    earlier_calls: list[dict] = field(default_factory=list)  # {"at", "title"}: the two talked calls before the last
+    last_call_summary: str = ""     # shown on hover
+    earlier_calls: list[dict] = field(default_factory=list)  # {"at", "title", "summary"}: the two calls before it
     lead_since: str = ""            # ISO date the deal was opened
 
     @property
@@ -213,7 +214,7 @@ class ClientCard:
                 "calls_count": self.calls_count, "phone": self.phone, "subscriber": self.subscriber,
                 "hours": self.hours, "ticket_items": self.ticket_items, "last_call_at": self.last_call_at,
                 "last_call_title": self.last_call_title, "promises": self.promises,
-                "earlier_calls": self.earlier_calls, "lead_since": self.lead_since}
+                "last_call_summary": self.last_call_summary, "earlier_calls": self.earlier_calls, "lead_since": self.lead_since}
 
     def to_prompt(self) -> str:
         """The client block of the master prompt, in Polish."""
@@ -292,7 +293,7 @@ def split_promises(s: str | None, n: int = 3) -> list[str]:
     if len([p for p in parts if p.strip()]) < 2:
         s = re.sub(r"^\d{1,2}[.)]\s+", "", s)
         parts = re.split(r"(?<=[.!?])\s+(?=[A-ZĄĆĘŁŃÓŚŹŻ])", s)
-    return [_short(p.strip().rstrip("."), 90) for p in parts if p.strip()][:n]
+    return [_short(p.strip().rstrip("."), 300) for p in parts if p.strip()][:n]
 
 
 class Crm:
@@ -427,7 +428,7 @@ class Crm:
         if nxt:
             day = _date(nxt["next_contact_date"])
             what = "Zaległy kontakt, planowany" if day < dt.date.today().isoformat() else "Następny kontakt"
-            card.callback = f"{what} {day}: {_short(nxt.get('next_contact_note'), 60)}"
+            card.callback = f"{what} {day}: {_short(nxt.get('next_contact_note'), 300)}"
         for cid in ids:
             c = self.clients[cid]
             card.subscriber = card.subscriber or bool(c.get("has_retainer") or c.get("monthly_hours_limit"))
@@ -482,10 +483,11 @@ class Crm:
             card.last_call = f"{_date(last['called_at'])}: {_short(last.get('title') or last['ai_summary'], 70)}"
             card.promised = _short(last.get("suggestions"), 140)
             card.last_call_at = last["called_at"] or ""
-            card.last_call_title = _short(last.get("title") or last["ai_summary"], 70)
+            card.last_call_title = _short(last.get("title") or last["ai_summary"], 200)
+            card.last_call_summary = _short(last["ai_summary"], 600)
             card.promises = split_promises(last.get("suggestions"))
-            card.earlier_calls = [{"at": r["called_at"] or "", "title": _short(r.get("title") or r["ai_summary"], 70)}
-                                  for r in talked[1:3]]
+            card.earlier_calls = [{"at": r["called_at"] or "", "title": _short(r.get("title") or r["ai_summary"], 200),
+                                   "summary": _short(r["ai_summary"], 600)} for r in talked[1:3]]
         if any(r.get("callback_status") == "not_started" for r in rows[:8]) and not card.callback:
             card.callback = "Nieoddzwoniony nieodebrany telefon"
         card.history = [f"{_date(r['called_at'])} ({'przych.' if r.get('direction') == 'inbound' else 'wych.'}): "

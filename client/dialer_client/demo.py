@@ -37,6 +37,7 @@ LINES = [(3, "operator", "Dzień dobry, EMANAGER, w czym mogę pomóc?"),
 def main() -> int:
     app = QApplication(sys.argv)
     T.load_fonts()
+    app.setStyleSheet(T.TOOLTIP_QSS)
     app.setFont(T.sans(13))
     ov = Overlay(sys.argv[2] if len(sys.argv) > 2 else "bottom-right", hint_seconds=12)
     ov.show()
