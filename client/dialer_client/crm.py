@@ -33,6 +33,8 @@ log = logging.getLogger("crm")
 TIMEOUT_S = 10
 CACHE_TTL_S = 600            # clients and deals are re-read every 10 minutes
 CLOSED_TICKETS = ("rozwiazane", "zamkniete")
+MIN_TALK_S = 30                # shorter calls ("Halo?", dropped at once) say nothing about the client
+EMPTY_CALL = re.compile(r"brak (treści|tresci|rozmowy|danych)", re.I)
 TEST_NAMES = re.compile(r"\btest", re.I)
 LEGAL = re.compile(r"\b(sp(o|ó)lka|sp|z|o|oo|s\.?a|sa|sc|s\.?c|ograniczona|odpowiedzialnoscia|"
                    r"odpowiedzialnością|komandytowa|jawna|ltd|gmbh|inc|firma|pphu|phu|fhu)\b", re.I)
@@ -272,6 +274,13 @@ def _deal_line(d: dict) -> str:
     return title
 
 
+def _talked(r: dict) -> bool:
+    """A call worth remembering: it has an AI summary, lasted a while and the summary isn't 'nothing to analyse'."""
+    if not r.get("ai_summary") or EMPTY_CALL.search(r.get("title") or ""):
+        return False
+    return r.get("duration") is None or r["duration"] >= MIN_TALK_S
+
+
 def split_promises(s: str | None, n: int = 3) -> list[str]:
     """'1. Wysłać ofertę. 2. Oddzwonić w piątek.' -> ['Wysłać ofertę', 'Oddzwonić w piątek']."""
     s = " ".join((s or "").split())
@@ -458,22 +467,22 @@ class Crm:
         if not conds:
             return
         try:
-            rows = self.sb.select("calls", select="called_at,direction,title,ai_summary,suggestions,callback_status",
-                                  **{"or": f"({','.join(conds)})"}, deleted_at="is.null",
-                                  order="called_at.desc.nullslast", limit="8")
+            rows = self.sb.select("calls", select="called_at,direction,duration,title,ai_summary,suggestions,"
+                                  "callback_status", **{"or": f"({','.join(conds)})"}, deleted_at="is.null",
+                                  order="called_at.desc.nullslast", limit="25")
         except CrmError as e:
             log.info("calls unavailable: %s", e)
             return
         card.calls_count = len(rows)
-        talked = [r for r in rows if r.get("ai_summary")]
+        talked = [r for r in rows if _talked(r)]  # skip empty and dropped calls, take the next ones instead
         if talked:
             last = talked[0]
             card.last_call = f"{_date(last['called_at'])}: {_short(last.get('title') or last['ai_summary'], 70)}"
             card.promised = _short(last.get("suggestions"), 140)
-            card.last_call_at = _date(last["called_at"])
+            card.last_call_at = last["called_at"] or ""
             card.last_call_title = _short(last.get("title") or last["ai_summary"], 70)
             card.promises = split_promises(last.get("suggestions"))
-        if any(r.get("callback_status") == "not_started" for r in rows) and not card.callback:
+        if any(r.get("callback_status") == "not_started" for r in rows[:8]) and not card.callback:
             card.callback = "Nieoddzwoniony nieodebrany telefon"
         card.history = [f"{_date(r['called_at'])} ({'przych.' if r.get('direction') == 'inbound' else 'wych.'}): "
                         f"{_short(r.get('title'), 80)}. {_short(r.get('ai_summary'), 300)} "

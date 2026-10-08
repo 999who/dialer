@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import time
-from datetime import date
+from datetime import date, datetime
 from html import escape
 
 from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal
@@ -300,6 +300,24 @@ def _ago(iso: str) -> str:
     return "dziś" if days <= 0 else "wczoraj" if days == 1 else f"{days} dni temu"
 
 
+WEEKDAYS = ("poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota", "niedziela")
+
+
+def _when(iso: str) -> str:
+    """'dziś, 13:00', 'wczoraj, 9:05', 'środa, 17:34' within a week, else '01.10.2026, 13:00' (local time)."""
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return _pl_date(iso)
+    if len(iso) <= 10:  # a bare date, no time to show
+        return _pl_date(iso)
+    dt = dt.astimezone() if dt.tzinfo else dt
+    days = (date.today() - dt.date()).days
+    day = ("dziś" if days <= 0 else "wczoraj" if days == 1 else WEEKDAYS[dt.weekday()] if days < 7
+           else dt.strftime("%d.%m.%Y"))
+    return f"{day}, {dt.hour}:{dt.minute:02d}"
+
+
 def _pl_date(iso: str) -> str:
     try:
         return date.fromisoformat(iso[:10]).strftime("%d.%m.%Y")
@@ -437,8 +455,10 @@ class ClientCard(Card):
         if data.get("last_call_at") or data.get("callback") or (deal and kind != "lead"):
             self.body.addWidget(self._sep())
         if data.get("last_call_at"):
-            sec = self._section("OSTATNIA ROZMOWA", "", _ago(data["last_call_at"]))
-            line = QLabel(f'<span style="color:{T.MUTED2}">{_pl_date(data["last_call_at"])}</span> · '
+            when = _when(data["last_call_at"])
+            ago = _ago(data["last_call_at"])
+            sec = self._section("OSTATNIA ROZMOWA", "", "" if when.split(",")[0] in (ago, *WEEKDAYS) else ago)
+            line = QLabel(f'<span style="color:{T.MUTED2}">{when}</span> · '
                           f'{escape(data.get("last_call_title") or "")}')
             line.setFont(T.sans(13))
             line.setStyleSheet(f"color:{T.TEXT};background:transparent;")
@@ -844,7 +864,9 @@ class TranscriptView(QScrollArea):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setStyleSheet("QScrollArea{background:transparent;} QScrollBar:vertical{width:6px;background:transparent;}"
                            f"QScrollBar::handle:vertical{{background:{T.BORDER};border-radius:3px;}}"
-                           "QScrollBar::add-line,QScrollBar::sub-line{height:0;}")
+                           "QScrollBar::add-line,QScrollBar::sub-line{height:0;}"
+                           # without this Qt fills the track with its default dotted pattern
+                           "QScrollBar::add-page,QScrollBar::sub-page{background:none;}")
         inner = QWidget()
         inner.setStyleSheet("background:transparent;")
         self.lay = QVBoxLayout(inner)
@@ -853,11 +875,18 @@ class TranscriptView(QScrollArea):
         self.lay.addStretch(1)  # rows are inserted above it: top-aligned like the mockup
         self.setWidget(inner)
         self.rows: list[QWidget] = []
+        # follow new lines while the operator is at the bottom; leave them alone once they scroll up.
+        # The range grows only after Qt lays out the wrapped text, so scroll on rangeChanged, not on add().
+        self._follow = True
+        bar = self.verticalScrollBar()
+        bar.valueChanged.connect(lambda v: setattr(self, "_follow", v >= bar.maximum() - 8))
+        bar.rangeChanged.connect(lambda _lo, hi: self._follow and bar.setValue(hi))
 
     def clear(self) -> None:
         for r in self.rows:
             r.deleteLater()
         self.rows.clear()
+        self._follow = True
 
     def add(self, t: float, speaker: str, s: str) -> None:
         row = QWidget()
@@ -880,7 +909,6 @@ class TranscriptView(QScrollArea):
             eff = r.graphicsEffect() or QGraphicsOpacityEffect(r)
             eff.setOpacity(1.0 if i == 0 else 0.75 if i == 1 else 0.5)
             r.setGraphicsEffect(eff)
-        QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(self.verticalScrollBar().maximum()))
 
 
 class ExpandedPanel(Card):

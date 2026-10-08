@@ -89,7 +89,7 @@ def test_client_by_contact_and_own_phone_with_details():
     assert card.last_call.startswith("2026-10-01") and card.promised == "1. Wysłać ofertę."
     assert card.subscriber and card.hours == {"limit": 10.0, "left": 3.5, "used": 6.5, "pct": 65}
     assert card.ticket_items == [{"number": 7, "title": "Strona nie działa", "status": "w_toku"}]
-    assert card.last_call_at == "2026-10-01" and card.promises == ["Wysłać ofertę"]
+    assert card.last_call_at.startswith("2026-10-01T10:00") and card.promises == ["Wysłać ofertę"]
     prompt = card.to_prompt()
     assert "Firma / klient: Floresca" in prompt and "Poprzednie rozmowy" in prompt
 
@@ -187,3 +187,11 @@ def test_prompt_lines_for_hours_over_limit_and_overdue_contact():
     c.deals = [dict(d, next_contact_date="2020-01-01T09:00:00+00:00") for d in c.deals]  # copies: DEALS is shared
     card = c.by_phone("783068607")
     assert card.callback.startswith("Zaległy kontakt, planowany 2020-01-01")
+
+
+def test_empty_and_dropped_calls_are_skipped():
+    from dialer_client.crm import _talked
+    assert not _talked({"ai_summary": "x", "title": "Brak treści do analizy", "duration": 120})
+    assert not _talked({"ai_summary": "Halo?", "title": "Próba połączenia", "duration": 10})
+    assert not _talked({"ai_summary": None, "title": "Oferta", "duration": 300})
+    assert _talked({"ai_summary": "Ustalono ofertę.", "title": "Oferta", "duration": 178})
