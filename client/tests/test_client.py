@@ -262,3 +262,32 @@ def test_stop_and_pause_buttons_and_clearing_between_calls():
     assert not ov.panel.transcript.rows and not ov.cards
     ov.set_call(False)
     assert ov.bar.stop_btn.isHidden()
+
+
+def test_local_server_reports_the_real_startup_error_not_systemexit(monkeypatch):
+    import logging
+
+    from dialer_client import local_server
+    from dialer_client.config import Config
+
+    srv = local_server.LocalServer(Config(gemini_api_key="", local_stt="none"))
+
+    class FakeServer:
+        def __init__(self, cfg):
+            self.should_exit = False
+
+        async def startup(self, sockets=None):
+            pass
+
+        def run(self):  # what uvicorn does when the app's startup raises
+            try:
+                raise ConnectionRefusedError("[Errno 111] Connect call failed ('db.example', 5432)")
+            except ConnectionRefusedError:
+                logging.getLogger("uvicorn.error").exception("Application startup failed. Exiting.")
+            raise SystemExit(3)
+
+    import uvicorn
+    monkeypatch.setattr(uvicorn, "Server", FakeServer)
+    monkeypatch.syspath_prepend(str(local_server.BACKEND_DIR))
+    srv._run()
+    assert srv.state == "error" and srv.error.startswith("ConnectionRefusedError")

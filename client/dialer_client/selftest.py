@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 import time
 
@@ -26,10 +27,12 @@ def main() -> int:
     QCoreApplication.setApplicationName("EMANAGER Dialer")
     log.info("log: %s", _setup_logging())
     try:
-        srv = LocalServer(Config(gemini_api_key="", local_stt="none", agent_id="selftest"))
+        # CI sets SELFTEST_STT=parakeet: loads the real speech model inside the exe (cached between runs)
+        stt = os.environ.get("SELFTEST_STT", "none")
+        srv = LocalServer(Config(gemini_api_key="", local_stt=stt, agent_id="selftest"))
         srv.start()
         t0 = time.monotonic()
-        while srv.state == "loading" and time.monotonic() - t0 < 120:
+        while srv.state == "loading" and time.monotonic() - t0 < 900:
             time.sleep(0.2)
         assert srv.state == "ready", f"backend state {srv.state}: {srv.error}"
 

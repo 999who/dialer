@@ -11,7 +11,7 @@ client -> server
   text   {"type":"text","speaker":"client|operator","text":"…"}   # test injection, bypasses STT
 
 server -> client
-  {"type":"ready","model":"…","stt":"parakeet|none","llm_error":""}   # llm_error non-empty: no hints
+  {"type":"ready","model":"…","stt":"parakeet|none","llm_error":"","rag_error":""}   # llm_error: no hints; rag_error: no knowledge base
   {"type":"call_started","call_id":"…"}
   {"type":"transcript","speaker":"client","text":"…","t":12.3}
   {"type":"hint","id":"…","category":"objection","topic":"cena","hint":"…","quote":"…","match":0.92,
@@ -47,9 +47,19 @@ async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
     state["stt"] = make_stt(s)
     await state["stt"].start()
-    state["kb"] = KnowledgeBase(s.database_url)
-    await state["kb"].start()
-    state["embedder"] = await loop.run_in_executor(None, Embedder, s.embed_model) if s.database_url else None
+    # The knowledge base and call logging are optional: if the database or the e5 model is
+    # unreachable, speech recognition and hints still start, and the client says what's missing.
+    state["kb"], state["embedder"], state["rag_error"] = KnowledgeBase(s.database_url), None, ""
+    try:
+        await state["kb"].start()
+        if s.database_url:
+            state["embedder"] = await loop.run_in_executor(None, Embedder, s.embed_model)
+    except Exception as e:
+        log.exception("knowledge base unavailable, continuing without it")
+        state["rag_error"] = f"{type(e).__name__}: {e}"[:300]
+        if state["kb"].pool:
+            await state["kb"].pool.close()
+        state["kb"], state["embedder"] = KnowledgeBase(""), None
     state["llm"], state["llm_error"] = None, ""
     if s.gemini_api_key:
         from .llm import HintLLM
@@ -67,7 +77,7 @@ async def lifespan(app: FastAPI):
         log.warning("GEMINI_API_KEY empty: hints disabled, transcripts only")
         state["llm_error"] = "GEMINI_API_KEY empty"
     log.info("ready: stt=%s model=%s llm=%s rag=%s", s.stt_engine, s.gemini_model,
-             "ok" if not state["llm_error"] else "ERROR", bool(s.database_url))
+             "ok" if not state["llm_error"] else "ERROR", bool(state["embedder"]))
     yield
     if state["kb"].pool:
         await state["kb"].pool.close()
@@ -127,7 +137,7 @@ async def ws_endpoint(ws: WebSocket):
         await session.on_utterance(Utterance(seg.speaker, text, seg.t_start, seg.t_end, seg.ended_at))
 
     await send({"type": "ready", "model": s.gemini_model, "stt": s.stt_engine,
-                "llm_error": state.get("llm_error", "")})
+                "llm_error": state.get("llm_error", ""), "rag_error": state.get("rag_error", "")})
     log.info("operator %s connected", hello.get("agent_id"))
     try:
         while True:

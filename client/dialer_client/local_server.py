@@ -35,6 +35,20 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+class _LastError(logging.Handler):
+    """Keeps the last logged exception: uvicorn reports a failed startup only as SystemExit(3)
+    after logging the real error, and that real error is what the overlay should show."""
+
+    def __init__(self):
+        super().__init__(logging.ERROR)
+        self.text = ""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.exc_info and record.exc_info[1] is not None:
+            e = record.exc_info[1]
+            self.text = f"{type(e).__name__}: {e}"
+
+
 class LocalServer:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -68,6 +82,8 @@ class LocalServer:
         self._thread.start()
 
     def _run(self) -> None:
+        last = _LastError()
+        logging.getLogger().addHandler(last)
         try:
             import uvicorn
 
@@ -90,8 +106,12 @@ class LocalServer:
             if self.state != "ready":
                 raise RuntimeError("startup failed, see the log above")
         except BaseException as e:  # SystemExit from uvicorn on startup failure too
-            log.exception("local backend failed")
-            self.state, self.error = "error", f"{type(e).__name__}: {e}"[:200]
+            # uvicorn already logged the real error; SystemExit(3) / "startup failed" say nothing
+            cause = last.text or f"{type(e).__name__}: {e}"
+            log.exception("local backend failed: %s", cause)
+            self.state, self.error = "error", cause[:200]
+        finally:
+            logging.getLogger().removeHandler(last)
 
     def stop(self) -> None:
         if self._server is not None:

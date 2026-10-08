@@ -200,3 +200,20 @@ def test_new_prompt_without_rag_slot_gets_no_literal_placeholders_and_kb_matches
         assert "Sklep od 5000 zł" in dyn
     _, dyn = p.render("(brak dopasowań w bazie wiedzy)", "(brak)", "x")
     assert "FRAGMENTY BAZY WIEDZY" not in dyn
+
+
+def test_unreachable_database_does_not_stop_startup(monkeypatch):
+    monkeypatch.setenv("STT_ENGINE", "none")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@127.0.0.1:1/db")  # nothing listens on port 1
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    monkeypatch.setenv("AUTH_TOKEN", "t")
+    from app import config, main
+    config.get_settings.cache_clear()
+    from fastapi.testclient import TestClient
+
+    with TestClient(main.app) as c:
+        with c.websocket_connect("/ws") as ws:
+            ws.send_text(json.dumps({"type": "hello", "token": "t", "agent_id": "a1"}))
+            ready = ws.receive_json()
+            assert ready["type"] == "ready" and ready["rag_error"]
+    config.get_settings.cache_clear()

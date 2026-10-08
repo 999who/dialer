@@ -123,7 +123,7 @@ class DialerApp(QObject):
         self.tray.activated.connect(lambda *_: (self.overlay.showNormal(), self.overlay.reposition()))
         menu = QMenu()
         menu.addAction("Pokaż", lambda: (self.overlay.showNormal(), self.overlay.reposition()))
-        menu.addAction("Ustawienia (klucz Gemini)…", lambda: self.open_connection_settings())
+        menu.addAction("Ustawienia (Gemini, baza wiedzy)…", lambda: self.open_connection_settings())
         menu.addAction("Sprawdź aktualizacje", lambda: self.check_updates(manual=True))
         menu.addAction("Zamknij", QApplication.quit)
         self.tray.setContextMenu(menu)
@@ -269,11 +269,11 @@ class DialerApp(QObject):
             self.overlay.show_error("server", f"ponowna próba za {seconds} s")
 
     def open_connection_settings(self, reason: str = "") -> bool:
-        before = (self.cfg.gemini_api_key, self.cfg.gemini_model)
+        before = (self.cfg.gemini_api_key, self.cfg.gemini_model, self.cfg.database_url)
         if not ask_settings(self.cfg, reason, on_check_updates=lambda: self.check_updates(manual=True)):
             return False
-        if (self.cfg.gemini_api_key, self.cfg.gemini_model) != before:
-            relaunch()  # the built-in backend reads the key and model at startup
+        if (self.cfg.gemini_api_key, self.cfg.gemini_model, self.cfg.database_url) != before:
+            relaunch()  # the built-in backend reads these at startup
         return True
 
     def _on_message(self, m: dict) -> None:
@@ -283,6 +283,10 @@ class DialerApp(QObject):
                 self.overlay.show_error("no_llm", str(m["llm_error"])[:40])
             else:
                 self.overlay.clear_error("no_llm")
+            if m.get("rag_error"):
+                self.overlay.show_error("no_rag", str(m["rag_error"])[:40])
+            else:
+                self.overlay.clear_error("no_rag")
         elif t == "transcript":
             self.transcript.append((m.get("t", 0), m["speaker"], m["text"]))
             if self.detector.in_call:  # last words of an ended call go to its summary only
@@ -301,7 +305,7 @@ class DialerApp(QObject):
     def _on_error_action(self, kind: str) -> None:
         if kind == "server":
             self.link.connect_now()
-        elif kind == "no_llm":
+        elif kind in ("no_llm", "no_rag"):
             self.open_connection_settings()
         elif kind == "update":
             self.install_update()
@@ -351,7 +355,7 @@ class DialerApp(QObject):
                 a.triggered.connect(lambda _=False, k=key: self._set_corner(k))
                 group.addAction(a)
                 sub.addAction(a)
-            menu.addAction("Ustawienia (klucz Gemini)…", lambda: self.open_connection_settings())
+            menu.addAction("Ustawienia (Gemini, baza wiedzy)…", lambda: self.open_connection_settings())
             menu.addAction(f"Sprawdź aktualizacje (wersja {updater.version_label()})",
                            lambda: self.check_updates(manual=True))
             menu.addAction("Pokaż dziennik (log)", lambda: QDesktopServices.openUrl(
