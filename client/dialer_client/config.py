@@ -17,6 +17,15 @@ CLIENT_DIR = Path(__file__).resolve().parent.parent
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else CLIENT_DIR
 CONFIG_PATH = APP_DIR / "config.toml"
 
+# EMANAGER CRM (Supabase project EmanagerCRM), built into the app so operators only type their
+# login and password. Both values are public by design (the CRM website ships the same ones to
+# every browser): they only say which project to talk to. What an operator can read is decided by
+# their own sign-in and the CRM's row-level security. Never put a secret / service_role key or the
+# Postgres connection string here: the repository and the exe are public (crm.Supabase refuses
+# secret keys anyway).
+CRM_URL = "https://wdsgtbdqgtwnywvkquhd.supabase.co"
+CRM_KEY = "sb_publishable_FnyHwU0sPsUIXvAlRnhhWQ_r-amCQSk"
+
 
 @dataclass
 class Config:
@@ -44,8 +53,8 @@ class Config:
     require_zadarma: bool = True
     offline_buffer_s: int = 60
     # EMANAGER CRM (Supabase) for the client card; the operator signs in with their CRM account
-    crm_url: str = ""               # https://<project>.supabase.co
-    crm_key: str = ""               # publishable (anon) key: public by design, access is the operator's
+    crm_url: str = CRM_URL          # override only for another CRM project
+    crm_key: str = CRM_KEY          # publishable (anon) key: public by design, access is the operator's
     crm_sip: str = ""               # Zadarma extension of this PC (e.g. "100"); empty = any
     own_numbers: str = "609037902, 525275052"  # the company's own numbers: never a client card
 
@@ -66,6 +75,8 @@ def load_config(path: Path | None = None) -> Config:
     known = {f.name for f in fields(Config)}
     cfg = Config(**{k: v for k, v in data.items() if k in known})
     cfg.gemini_api_key = str(cfg.gemini_api_key).strip().strip("\"'")
+    cfg.crm_url = str(cfg.crm_url).strip().rstrip("/") or CRM_URL   # an empty line in config.toml = built-in
+    cfg.crm_key = str(cfg.crm_key).strip() or CRM_KEY
     if not cfg.agent_id:
         cfg.agent_id = getpass.getuser()
     return cfg

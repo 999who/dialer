@@ -35,8 +35,9 @@ require_zadarma = true
 offline_buffer_s = 60
 
 # EMANAGER CRM: the client card during a call. The operator signs in with their CRM account
-# (logo -> "Konto CRM"). URL and the publishable key: Supabase -> Project Settings -> API.
-crm_url = ""
-crm_key = ""
+# (logo -> "Konto CRM"). The CRM address and its public key are built into the app; set these
+# only to use another Supabase project (publishable key only, never a secret one).
+# crm_url = ""
+# crm_key = ""
 crm_sip = ""                  # Zadarma extension of this PC, e.g. "100"; empty = any
 own_numbers = "609037902, 525275052"   # company numbers: no client card

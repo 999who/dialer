@@ -15,6 +15,8 @@ Plain urllib, no extra dependency; every call blocks, so the app runs them in a 
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 import re
@@ -73,10 +75,27 @@ class Session:
     email: str
 
 
+def is_secret_key(key: str) -> bool:
+    """A Supabase key that bypasses row-level security (sb_secret_… or a service_role JWT)."""
+    key = (key or "").strip()
+    if key.startswith("sb_secret_"):
+        return True
+    parts = key.split(".")
+    if len(parts) == 3:
+        try:
+            pad = "=" * (-len(parts[1]) % 4)
+            return json.loads(base64.urlsafe_b64decode(parts[1] + pad)).get("role") == "service_role"
+        except (ValueError, binascii.Error):
+            return False
+    return False
+
+
 class Supabase:
     """Minimal Supabase client: Auth (password, refresh) and PostgREST reads/RPC."""
 
     def __init__(self, url: str, key: str):
+        if is_secret_key(key):  # it would skip the CRM's access rules for every operator
+            raise CrmError("To jest klucz tajny (secret/service_role). Dialer przyjmuje tylko klucz publiczny.")
         self.url = url.rstrip("/")
         self.key = key
         self.session: Session | None = None

@@ -140,3 +140,36 @@ def test_split_promises():
     assert split_promises("Klient ustali datę. Należy pamiętać o promocji.") == [
         "Klient ustali datę", "Należy pamiętać o promocji"]
     assert split_promises(None) == []
+
+
+def test_secret_keys_are_refused():
+    import base64
+    import json
+
+    from dialer_client.crm import Supabase, is_secret_key
+
+    def jwt(role):
+        body = base64.urlsafe_b64encode(json.dumps({"role": role}).encode()).decode().rstrip("=")
+        return f"eyJhbGciOiJIUzI1NiJ9.{body}.sig"
+
+    assert is_secret_key("sb_secret_abc") and is_secret_key(jwt("service_role"))
+    assert not is_secret_key("sb_publishable_abc") and not is_secret_key(jwt("anon"))
+    try:
+        Supabase("https://x.supabase.co", jwt("service_role"))
+    except CrmError:
+        pass
+    else:
+        raise AssertionError("a service_role key must be refused")
+
+
+def test_crm_address_is_built_in(tmp_path):
+    from dialer_client.config import CRM_KEY, CRM_URL, load_config
+    from dialer_client.crm import is_secret_key
+
+    assert CRM_URL.startswith("https://") and CRM_KEY.startswith("sb_publishable_") and not is_secret_key(CRM_KEY)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('crm_url = ""\ncrm_key = ""\n')      # old config files have the lines empty
+    c = load_config(cfg)
+    assert (c.crm_url, c.crm_key) == (CRM_URL, CRM_KEY)
+    cfg.write_text('crm_url = "https://other.supabase.co/"\ncrm_key = "sb_publishable_x"\n')
+    assert load_config(cfg).crm_url == "https://other.supabase.co"
