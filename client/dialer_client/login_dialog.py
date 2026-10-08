@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel, QL
                              QVBoxLayout, QWidget)
 
 from . import theme as T
+from .config import CRM_KEY, CRM_URL
 from .crm import CrmError, Supabase
 
 W = 400
@@ -271,21 +272,23 @@ class LoginDialog(QDialog):
 
     # ------------------------------------------------------------ sign-in
     def connection(self) -> dict:
-        return {"crm_url": self.url.text().strip().rstrip("/"), "crm_key": self.key.text().strip(),
+        # empty = the CRM built into the app
+        return {"crm_url": self.url.text().strip().rstrip("/") or CRM_URL, "crm_key": self.key.text().strip() or CRM_KEY,
                 "crm_sip": self.sip.text().strip()}
 
     def _login(self) -> None:
         conn = self.connection()
         email, password = self.email.text().strip(), self.password.text()
-        if not (conn["crm_url"] and conn["crm_key"]):
-            self._show_conn(True)
-            return self._show_alert("Wpisz adres CRM i klucz publiczny (Supabase → Project Settings → API).")
         if not (email and password):
             return self._show_alert("Wpisz login i hasło.")
         self._show_alert("")
         self._mark_error(False)
+        try:
+            sb = Supabase(conn["crm_url"], conn["crm_key"])
+        except CrmError as e:  # a secret key pasted by mistake
+            self._show_conn(True)
+            return self._show_alert(str(e))
         self._busy(True)
-        sb = Supabase(conn["crm_url"], conn["crm_key"])
         self._result = None
 
         def work():

@@ -411,7 +411,12 @@ class DialerApp(QObject):
         if not (self.cfg.crm_url and self.cfg.crm_key and token):
             QTimer.singleShot(300, self.crm_login)
             return
-        sb = Supabase(self.cfg.crm_url, self.cfg.crm_key)
+        try:
+            sb = Supabase(self.cfg.crm_url, self.cfg.crm_key)
+        except CrmError as e:  # a secret key in config.toml
+            msg = str(e)
+            QTimer.singleShot(300, lambda: self.crm_login(msg))
+            return
 
         def resume():
             sb.refresh(token)
