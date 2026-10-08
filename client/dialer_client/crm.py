@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import datetime as dt
 import json
 import logging
 import re
@@ -248,6 +249,28 @@ def _date(iso: str | None) -> str:
     return (iso or "")[:10]
 
 
+def _num(x: float) -> str:
+    return f"{x:g}"
+
+
+def _retainer_line(h: dict) -> str:
+    """Hours for Gemini. Over the limit it says so outright: that is when a 'small extra' must be quoted."""
+    over = h["used"] - h["limit"]
+    if over > 0:
+        return (f"Abonament {_num(h['limit'])} h/mies.: PRZEKROCZONY, wykorzystano {_num(h['used'])} h "
+                f"({_num(round(over, 1))} h ponad limit). Każda nowa praca w tym miesiącu tylko po wycenie "
+                f"lub rozszerzeniu pakietu")
+    return (f"Abonament: zostało {_num(h['left'])} h z {_num(h['limit'])} h w tym miesiącu "
+            f"({h['pct']}% wykorzystane)")
+
+
+def _deal_line(d: dict) -> str:
+    title = _short(d["title"], 90)
+    if d.get("contract_value") and "zł" not in title:  # titles often carry the amount already
+        title += f", {int(d['contract_value'])} zł"
+    return title
+
+
 def split_promises(s: str | None, n: int = 3) -> list[str]:
     """'1. Wysłać ofertę. 2. Oddzwonić w piątek.' -> ['Wysłać ofertę', 'Oddzwonić w piątek']."""
     s = " ".join((s or "").split())
@@ -387,11 +410,12 @@ class Crm:
     def _fill(self, card: ClientCard, deals: list[dict], n: str) -> None:
         ids = card.client_ids
         open_deals = deals + [d for d in self.deals if d.get("client_id") in ids and d not in deals]
-        card.deals = [_short(d["title"], 60) + (f", {int(d['contract_value'])} zł" if d.get("contract_value") else "")
-                      for d in open_deals[:3]]
+        card.deals = [_deal_line(d) for d in open_deals[:3]]
         nxt = next((d for d in open_deals if d.get("next_contact_date")), None)
         if nxt:
-            card.callback = f"Następny kontakt {_date(nxt['next_contact_date'])}: {_short(nxt.get('next_contact_note'), 60)}"
+            day = _date(nxt["next_contact_date"])
+            what = "Zaległy kontakt, planowany" if day < dt.date.today().isoformat() else "Następny kontakt"
+            card.callback = f"{what} {day}: {_short(nxt.get('next_contact_note'), 60)}"
         for cid in ids:
             c = self.clients[cid]
             card.subscriber = card.subscriber or bool(c.get("has_retainer") or c.get("monthly_hours_limit"))
@@ -401,8 +425,7 @@ class Crm:
                     if u.get("limit_godzin") and not card.hours:
                         card.hours = {"limit": float(u["limit_godzin"]), "left": float(u.get("zostalo_godzin") or 0),
                                       "used": float(u.get("zuzyte_godzin") or 0), "pct": int(u.get("procent") or 0)}
-                        card.retainer = (f"Abonament: zostało {u.get('zostalo_godzin')} h z {u.get('limit_godzin')} h "
-                                         f"w tym miesiącu ({u.get('procent')}% wykorzystane)")
+                        card.retainer = _retainer_line(card.hours)
                 except CrmError as e:
                     log.info("usage unavailable: %s", e)
             elif c.get("has_retainer") and not card.retainer:
