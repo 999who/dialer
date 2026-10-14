@@ -24,10 +24,14 @@ from .local_server import LocalServer
 from .model_download import DownloadProgress
 from .net import BackendLink
 from .overlay import CORNERS, Overlay
+from .widgets import QueueCard
 from .zadarma_audio import ZadarmaAudioWatcher
 from . import updater
 
 log = logging.getLogger("app")
+
+QUEUE_REFRESH_MS = 120_000     # the call queue is re-read every 2 minutes between calls
+QUEUE_AFTER_CALL_MS = 90_000   # after a call the client card stays this long, then the queue returns
 
 
 class Bridge(QObject):
@@ -68,6 +72,10 @@ class DialerApp(QObject):
         self.crm_remember = True           # keep the CRM session across restarts ("Zapamiętaj mnie")
         self.card = None                   # ClientCard of the current call
         self._call_seq = 0                 # a lookup for an earlier call must not land on this one
+        self.queue_items: list[dict] = []  # who to call next (CRM), most urgent first
+        self.queue_skipped: list[str] = []  # keys the operator skipped, moved to the end in this order
+        self._queue_busy = False
+        self.queue_timer = QTimer(self, interval=QUEUE_REFRESH_MS, timeout=self._refresh_queue)
         self._release = None
         self._updating = False
         self.link.message.connect(self._on_message)
@@ -82,6 +90,10 @@ class DialerApp(QObject):
         ov.settings_requested.connect(self._settings_menu)
         ov.save_crm.connect(self._save_crm)
         ov.open_transcript.connect(self._open_transcript)
+        ov.client_closed.connect(self._show_queue)
+        ov.dial.connect(self._dial)
+        ov.mail.connect(lambda uri: QDesktopServices.openUrl(QUrl(uri)))
+        ov.queue_skip.connect(self._skip_queue_entry)
 
         self.clock = QTimer(self, interval=1000, timeout=self._on_clock)
         self.clock.start()
@@ -176,6 +188,7 @@ class DialerApp(QObject):
         log.info("call started, operator: %s", self.operator or "(not signed in)")
         self.transcript.clear()
         self.overlay.clear_screen()  # nothing from the previous call stays on screen
+        self.overlay.clear_queue()   # the client card takes its place
         self.overlay.set_paused(False)  # pause is for one call only
         self.link.call_start("")
         self._call_seq += 1
@@ -194,6 +207,45 @@ class DialerApp(QObject):
         self.overlay.set_call(False)
         self.overlay.clear_transcript()  # the summary card keeps it ("Otwórz transkrypcję")
         self.overlay.clear_error("no_line")
+        seq = self._call_seq
+        QTimer.singleShot(QUEUE_AFTER_CALL_MS, lambda: self._back_to_queue(seq))
+        QTimer.singleShot(5000, self._refresh_queue)  # the CRM has the call by then
+
+    # ---------------------------------------------------------------- call queue (between calls)
+    def _back_to_queue(self, seq: int) -> None:
+        if seq != self._call_seq or self.detector.in_call:
+            return  # another call has started since
+        self.overlay.clear_client()
+        self._show_queue()
+
+    def _refresh_queue(self) -> None:
+        crm = self.crm
+        if not crm or self._queue_busy or self.detector.in_call:
+            return
+        self._queue_busy = True
+        self._crm_worker("queue", lambda: ("queue", crm.queue()))
+
+    def _show_queue(self) -> None:
+        if not self.crm or self.detector.in_call or self.overlay.has_client():
+            return
+        skipped = [k for k in self.queue_skipped if any(i["key"] == k for i in self.queue_items)]
+        self.queue_skipped = skipped
+        items = [i for i in self.queue_items if i["key"] not in skipped]
+        items += sorted((i for i in self.queue_items if i["key"] in skipped), key=lambda i: skipped.index(i["key"]))
+        self.overlay.show_queue(items)
+
+    def _skip_queue_entry(self, key: str) -> None:
+        if key in self.queue_skipped:
+            self.queue_skipped.remove(key)
+        self.queue_skipped.append(key)
+        self._show_queue()
+
+    def _dial(self, uri: str) -> None:
+        """Hands the number to the softphone (Zadarma registers as the tel: handler)."""
+        log.info("dialling from the queue: %s", uri[:9] + "…")
+        if not QDesktopServices.openUrl(QUrl(uri)):
+            QApplication.clipboard().setText(uri.removeprefix("tel:"))
+            self._notify("Nie udało się otworzyć Zadarma. Numer skopiowano do schowka.")
 
     def end_call_by_hand(self) -> None:
         """Stop button / menu: ends the call now and clears the screen."""
@@ -450,6 +502,9 @@ class DialerApp(QObject):
         self.qs.remove("crm/refresh_token")
         log.info("operator %s signed out", self.operator)
         self.crm, self.operator = None, ""
+        self.queue_timer.stop()
+        self.queue_items = []
+        self.overlay.clear_queue()
         self.link.agent_id = self.cfg.agent_id
         self.crm_login()
 
@@ -505,6 +560,9 @@ class DialerApp(QObject):
                 return "profile", profile
 
             self._crm_worker("profile", warm)
+            self.queue_skipped = []
+            self.queue_timer.start()
+            QTimer.singleShot(3000, self._refresh_queue)
         elif event == "token":
             if self.crm and self.crm_remember:
                 self.qs.setValue("crm/refresh_token", payload)
@@ -520,11 +578,20 @@ class DialerApp(QObject):
             self.overlay.show_client(card.to_dict())
             self.link.send({"type": "client_context", "text": card.to_prompt()})
             log.info("client card: %s (%s, by %s)", card.title or card.person or "-", card.kind, card.via)
+        elif event == "queue":
+            self._queue_busy = False
+            changed = [(i["key"], i["at"]) for i in payload] != [(i["key"], i["at"]) for i in self.queue_items]
+            self.queue_items = payload
+            log.info("call queue: %d entries", len(payload))
+            if changed or not any(isinstance(c, QueueCard) for c in self.overlay.cards):
+                self._show_queue()  # unchanged: don't rebuild under the operator's mouse
         elif event == "no_number":
             if payload == self._call_seq and self.detector.in_call and self.crm and self.crm.has_current_call_fn:
                 log.info("no Zadarma event for this call in the CRM")
         elif event == "failed":
             name, e = payload
+            if name == "queue":
+                self._queue_busy = False
             if name == "resume":
                 if isinstance(e, CrmError) and e.status in (400, 401, 403):  # the saved session is gone
                     self.qs.remove("crm/refresh_token")
@@ -533,6 +600,8 @@ class DialerApp(QObject):
                     QTimer.singleShot(60000, self._crm_startup)
             elif isinstance(e, CrmError) and e.status == 401 and self.crm:
                 self.crm = None
+                self.queue_timer.stop()
+                self.overlay.clear_queue()
                 self._notify("Sesja CRM wygasła. Zaloguj się ponownie (logo → Konto CRM).")
 
     # ---------------------------------------------------------------- updates

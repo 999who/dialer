@@ -307,6 +307,8 @@ class Crm:
         self.clients: dict[str, dict] = {}
         self.deals: list[dict] = []
         self.persons: list[dict] = []
+        self.columns: list[dict] = []
+        self.places: list[dict] = []
         self.has_current_call_fn = True
         self.profile: dict = {}
 
@@ -314,17 +316,30 @@ class Crm:
     def refresh_cache(self, force: bool = False) -> None:
         if not force and self._cache_at is not None and time.monotonic() - self._cache_at < CACHE_TTL_S:
             return
-        rows = self.sb.select("clients", select="id,name,phone,status,has_retainer,monthly_hours_limit,is_demo")
+        rows = self.sb.select("clients", select="id,name,phone,city,status,has_retainer,monthly_hours_limit,is_demo")
         self.clients = {r["id"]: r for r in rows if not r.get("is_demo") and not TEST_NAMES.search(r["name"] or "")}
         try:
             self.deals = self.sb.select(
-                "crm_deals", select="id,title,client_id,contact_phone,deal_status,contract_value,"
-                "next_contact_date,next_contact_note,created_at", is_archived="eq.false", is_demo="eq.false")
+                "crm_deals", select="id,title,client_id,contact_phone,contact_email,deal_status,contract_value,"
+                "next_contact_date,next_contact_note,next_contact_done_at,column_id,source,offer_sent_at,created_at",
+                is_archived="eq.false", is_demo="eq.false")
         except CrmError as e:  # no access to the sales pipeline: the card works without deals
             log.info("deals unavailable: %s", e)
             self.deals = []
         self.persons = self.sb.select("customer_contacts", select="first_name,last_name,position,customer_id,"
                                       "phone_key,is_primary", is_demo="eq.false")
+        try:  # stages of the sales pipeline, in board order
+            cols = self.sb.select("crm_columns", select="id,name,lexo_rank", is_demo="eq.false")
+            self.columns = sorted(cols, key=lambda c: c.get("lexo_rank") or "")
+        except CrmError as e:
+            log.info("pipeline stages unavailable: %s", e)
+            self.columns = []
+        try:  # firms from the Google Maps scraper (cold calls); only full staff may read them
+            self.places = self.sb.select("scraped_places", select="id,name,phone_number,category,rating,"
+                                         "reviews_count,address,website", is_archived="eq.false")
+        except CrmError as e:
+            log.info("scraped places unavailable: %s", e)
+            self.places = []
         self._cache_at = time.monotonic()
         log.info("crm cache: %d clients, %d deals, %d contact persons",
                  len(self.clients), len(self.deals), len(self.persons))
@@ -493,3 +508,251 @@ class Crm:
         card.history = [f"{_date(r['called_at'])} ({'przych.' if r.get('direction') == 'inbound' else 'wych.'}): "
                         f"{_short(r.get('title'), 80)}. {_short(r.get('ai_summary'), 300)} "
                         f"Ustalenia: {_short(r.get('suggestions'), 200)}" for r in talked[:5]]
+
+    # ------------------------------------------------------------ the call queue (between calls)
+    def queue(self, now: dt.datetime | None = None) -> list[dict]:
+        """Who to call now, most urgent first; read-only.
+
+        Order: contacts planned for now → missed calls, newest first → contacts planned later today
+        → overdue planned contacts, newest first. A missed call drops out once anyone has talked with
+        that number since, or its callback was marked done in the CRM.
+        """
+        now = now or dt.datetime.now(dt.timezone.utc)
+        self.refresh_cache()
+        planned = self._planned(now)
+        items = ([i for i in planned if i["reason"] == "now"] + self._missed(now) +
+                 [i for i in planned if i["reason"] != "now"])
+        seen: set[str] = set()
+        unique = []
+        for it in items:  # each number once: its most urgent reason wins
+            key = normalize_phone(it["phone"]) or it["key"]
+            if key not in seen:
+                seen.add(key)
+                unique.append(it)
+        unique = unique[:QUEUE_MAX]
+        self._enrich(unique)
+        return unique
+
+    def _missed(self, now: dt.datetime) -> list[dict]:
+        since = (now - dt.timedelta(days=QUEUE_MISSED_DAYS)).isoformat()
+        try:
+            rows = self.sb.select("calls", select="client_number,called_at,direction,disposition,callback_status",
+                                  called_at=f"gte.{since}", deleted_at="is.null", order="called_at.desc",
+                                  limit="1000")
+        except CrmError as e:
+            log.info("missed calls unavailable: %s", e)
+            return []
+        by_number: dict[str, list[dict]] = {}
+        for r in rows:
+            n = normalize_phone(r.get("client_number"))
+            if n and n not in self.own:
+                by_number.setdefault(n, []).append(r)
+        out = []
+        for calls in by_number.values():  # newest first
+            missed = []
+            for r in calls:
+                if r.get("disposition") == "answered":
+                    break  # someone has talked with them since
+                if r.get("direction") == "inbound":
+                    missed.append(r)
+            if not missed or missed[0].get("callback_status") in ("done", "dismissed"):
+                continue
+            out.append({"key": f"missed:{normalize_phone(missed[0]['client_number'])}", "reason": "missed",
+                        "at": missed[0]["called_at"], "count": len(missed), "phone": missed[0]["client_number"]})
+        return sorted(out, key=lambda i: i["at"], reverse=True)
+
+    def _planned(self, now: dt.datetime) -> list[dict]:
+        local_now = now.astimezone()
+        today = local_now.date()
+        out = []
+        for d in self.deals:
+            if not d.get("next_contact_date") or d.get("next_contact_done_at"):
+                continue
+            try:
+                due = dt.datetime.fromisoformat(d["next_contact_date"].replace("Z", "+00:00")).astimezone()
+            except ValueError:
+                continue
+            if due.date() > today or (today - due.date()).days > QUEUE_OVERDUE_DAYS:
+                continue
+            all_day = (due.hour, due.minute) == (0, 0)  # a date without a time
+            if due.date() < today:
+                reason = "overdue"
+            elif all_day or due <= local_now + dt.timedelta(minutes=15):
+                reason = "now"
+            else:
+                reason = "today"
+            out.append({"key": f"deal:{d['id']}", "reason": reason, "at": d["next_contact_date"],
+                        "all_day": all_day, "count": 0, "phone": d.get("contact_phone") or "", "deal": d})
+        newest_first = {"now": False, "today": False, "overdue": True}  # overdue: the freshest is the likeliest real
+        return [i for r in ("now", "today", "overdue")
+                for i in sorted((x for x in out if x["reason"] == r), key=lambda x: x["at"], reverse=newest_first[r])]
+
+    def _enrich(self, items: list[dict]) -> None:
+        """Who each entry is, in the card's order (client → deal → Google contact → Google Maps
+        → call history → bare number), and what to show about them."""
+        numbers = {normalize_phone(i["phone"]) for i in items} - {""}
+        contacts: dict[str, list[dict]] = {}
+        if numbers:
+            try:
+                for c in self.sb.select("contacts", select="first_name,last_name,organization,email,phone_key",
+                                        phone_key=f"in.({','.join(sorted(numbers))})"):
+                    contacts.setdefault(c.get("phone_key") or "", []).append(c)
+            except CrmError as e:
+                log.info("contacts unavailable: %s", e)
+        places = {normalize_phone(p.get("phone_number")): p for p in self.places}
+        places.pop("", None)
+        for it in items:
+            n = normalize_phone(it["phone"])
+            deal = it.pop("deal", None)
+            ids = self._client_ids(n) if n else []
+            if deal and deal.get("client_id") in self.clients:
+                ids = [deal["client_id"]] + [i for i in ids if i != deal["client_id"]]
+            deals = [deal] if deal else [d for d in self.deals if n and normalize_phone(d.get("contact_phone")) == n]
+            it.update(email="", title="", person="", calls=[], prior_calls=0)
+            if ids:
+                c = self.clients[ids[0]]
+                it.update(type="client", client_id=ids[0], title=c["name"], city=c.get("city") or "",
+                          subscriber=bool(c.get("has_retainer") or c.get("monthly_hours_limit")),
+                          deals_open=sum(1 for d in self.deals if d.get("client_id") == ids[0]))
+                mine = [p for p in self.persons if p["customer_id"] == ids[0]]
+                p = next((p for p in mine if n and p.get("phone_key") == n), None) or \
+                    next((p for p in mine if p.get("is_primary")), None)
+                if p:
+                    it["person"] = " ".join(x for x in (p.get("first_name"), p.get("last_name")) if x)
+                    it["position"] = p.get("position") or ""
+                if deal:
+                    self._deal_fields(it, deal)
+            elif deals:
+                it["type"] = "lead"
+                self._deal_fields(it, deals[0])
+            elif contacts.get(n):
+                cs = contacts[n]
+                names = list(dict.fromkeys(filter(None, (" ".join(x for x in (c.get("first_name"), c.get("last_name"))
+                                                                   if x).strip() for c in cs))))
+                orgs = list(dict.fromkeys(filter(None, ((c.get("organization") or "").strip() for c in cs))))
+                if len(names) == 1:
+                    title, org = names[0], (orgs[0] if orgs else "")
+                else:  # a shared office number: the company, else the names
+                    title, org = (orgs[0], "") if len(orgs) == 1 else ("Kilka kontaktów: " + ", ".join(names[:3]), "")
+                it.update(type="google", title=title, org=org,
+                          email=next((c["email"] for c in cs if c.get("email")), ""))
+            elif n in places:
+                p = places[n]
+                it.update(type="maps", title=p.get("name") or "", category=p.get("category") or "",
+                          rating=p.get("rating"), reviews=p.get("reviews_count") or 0,
+                          address=p.get("address") or "", website=p.get("website") or "",
+                          calls_back=it["reason"] == "missed")
+            else:
+                it["type"] = "new"  # becomes "hist" below when the number has talked-through calls
+        self._queue_calls(items)
+        self._queue_details(items)
+
+    def _client_ids(self, n: str) -> list[str]:
+        ids = [p["customer_id"] for p in self.persons if p.get("phone_key") == n]
+        ids += [cid for cid, c in self.clients.items() if normalize_phone(c.get("phone")) == n]
+        ids += [d["client_id"] for d in self.deals
+                if d.get("client_id") and normalize_phone(d.get("contact_phone")) == n]
+        return [i for i in dict.fromkeys(ids) if i in self.clients]
+
+    def _deal_fields(self, it: dict, d: dict) -> None:
+        if it.get("type") != "client":
+            it["title"] = d.get("title") or ""
+        it.update(deal_id=d["id"], value=d.get("contract_value"), next_note=d.get("next_contact_note") or "",
+                  next_at=d.get("next_contact_date") or "", offer_sent=d.get("offer_sent_at") or "",
+                  source=DEAL_SOURCES.get(d.get("source") or "", ""), stage=self._stage(d.get("column_id")))
+        it["email"] = it["email"] or d.get("contact_email") or ""
+
+    def _stage(self, column_id: str | None) -> dict:
+        for i, c in enumerate(self.columns):
+            if c["id"] == column_id:
+                return {"name": c.get("name") or "", "index": i + 1, "total": len(self.columns)}
+        return {}
+
+    def _queue_calls(self, items: list[dict]) -> None:
+        """Earlier talked-through calls of every entry, in one query: by number and by client."""
+        conds = [f"client_number.like.*{n}" for n in sorted({normalize_phone(i["phone"]) for i in items} - {""})]
+        conds += [f"client_id.eq.{i['client_id']}" for i in items if i.get("client_id")]
+        if not conds:
+            return
+        try:
+            rows = self.sb.select("calls", select="client_number,client_id,called_at,direction,duration,title,"
+                                  "ai_summary", **{"or": f"({','.join(dict.fromkeys(conds))})"}, deleted_at="is.null",
+                                  order="called_at.desc.nullslast", limit="500")
+        except CrmError as e:
+            log.info("queue call history unavailable: %s", e)
+            return
+        for it in items:
+            n = normalize_phone(it["phone"])
+            mine = [r for r in rows if (n and normalize_phone(r.get("client_number")) == n) or
+                    (it.get("client_id") and r.get("client_id") == it["client_id"])]
+            talked = [r for r in mine if _talked(r)]
+            it["prior_calls"] = len(talked)
+            it["calls"] = [{"at": r["called_at"] or "", "title": _short(r.get("title") or r["ai_summary"], 120),
+                            "summary": _short(r["ai_summary"], 600)} for r in talked[:3]]
+            out = next((r for r in mine if r.get("direction") == "outbound"), None)
+            if out:
+                it["we_called_at"] = out["called_at"] or ""
+            if it["type"] == "new" and talked:
+                it["type"] = "hist"
+
+    def _queue_details(self, items: list[dict]) -> None:
+        """Hours and open tickets of clients; how often a deal's offer link was opened."""
+        client_ids = list(dict.fromkeys(i["client_id"] for i in items if i.get("client_id")))
+        if client_ids:
+            try:
+                rows = self.sb.select("tickets", select="client_id", client_id=f"in.({','.join(client_ids)})",
+                                      deleted_at="is.null", status=f"not.in.({','.join(CLOSED_TICKETS)})")
+                for it in items:
+                    if it.get("client_id"):
+                        it["tickets_open"] = sum(1 for r in rows if r["client_id"] == it["client_id"])
+            except CrmError as e:
+                log.info("queue tickets unavailable: %s", e)
+        hours: dict[str, dict] = {}
+        for cid in client_ids:
+            if not self.clients[cid].get("monthly_hours_limit"):
+                continue
+            try:
+                u = self.sb.rpc("get_client_usage_banner", {"_client_id": cid}) or {}
+                if u.get("limit_godzin"):
+                    hours[cid] = {"limit": float(u["limit_godzin"]), "left": float(u.get("zostalo_godzin") or 0),
+                                  "used": float(u.get("zuzyte_godzin") or 0), "pct": int(u.get("procent") or 0)}
+            except CrmError as e:
+                log.info("usage unavailable: %s", e)
+        deal_ids = list(dict.fromkeys(i["deal_id"] for i in items if i.get("deal_id") and i.get("offer_sent")))
+        opens: dict[str, int] = {}
+        if deal_ids:
+            try:
+                for r in self.sb.select("deal_share_links", select="deal_id,link_open_count,is_revoked",
+                                        deal_id=f"in.({','.join(deal_ids)})"):
+                    if not r.get("is_revoked"):
+                        opens[r["deal_id"]] = opens.get(r["deal_id"], 0) + int(r.get("link_open_count") or 0)
+            except CrmError as e:
+                log.info("offer views unavailable: %s", e)
+        for it in items:
+            if it.get("client_id") in hours:
+                it["hours"] = hours[it["client_id"]]
+            if it.get("deal_id") in opens:
+                it["offer_opens"] = opens[it["deal_id"]]
+
+
+QUEUE_MAX = 30              # entries fetched; the overlay shows the first 6
+QUEUE_MISSED_DAYS = 7       # older missed calls drop out of the queue
+QUEUE_OVERDUE_DAYS = 30     # planned contacts overdue longer than this are treated as stale
+DEAL_SOURCES = {"website": "formularz WWW", "call_center": "call center", "referral": "polecenie",
+                "social": "social media", "ai": "asystent AI", "ticket": "zgłoszenie",
+                "existing_client": "obecny klient", "call": "telefon", "kontakty_lukasza": "kontakty Łukasza"}
+
+
+def dial_uri(phone: str) -> str:
+    """tel: link for the softphone: '+48 509 506 219', '48509506219' and '509506219' -> 'tel:+48509506219'."""
+    raw = (phone or "").strip()
+    digits = re.sub(r"\D", "", raw)
+    if not digits:
+        return ""
+    if raw.startswith("00"):
+        digits = digits[2:]
+    elif len(digits) == 9 and not raw.startswith("+"):
+        digits = "48" + digits  # a Polish number without the country code
+    elif not raw.startswith("+") and not (len(digits) == 11 and digits.startswith("48")):
+        return f"tel:{digits}"  # short or unusual: pass it on as it is
+    return f"tel:+{digits}"
