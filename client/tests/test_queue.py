@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dialer_client.crm import Crm, CrmError, dial_uri  # noqa: E402
+from dialer_client.crm import test_entries as local_cards  # noqa: E402  (not collected as a test)
 
 NOW = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
 
@@ -206,7 +207,14 @@ def test_queue_widget_rows_unfold_and_skip():
     assert len(card.rows) == 6
     first = card.rows[0]
     assert first.card.isHidden() and not first.row.isHidden()
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+    QTest.mouseClick(first.row, Qt.MouseButton.LeftButton)  # a click unfolds, hovering doesn't
+    second = card.rows[1]
+    second.set_open(True)
+    assert first.card.isHidden()  # one open at a time
     first.set_open(True)
+    assert second.card.isHidden()
     assert first.row.isHidden() and not first.card.isHidden()
     first.dial.emit(first.uri)
     first.skip.emit(first.it["key"])
@@ -215,3 +223,70 @@ def test_queue_widget_rows_unfold_and_skip():
     assert queue_reason(items[2]).startswith("Nieodebrane 2× · ")
     ov.show_client({"kind": "client", "title": "Floresca"})  # a call starts: the card replaces the queue
     assert not any(isinstance(c, QueueCard) for c in ov.cards)
+
+
+def test_local_test_cards_from_config():
+    one, two = local_cards("Gleb +48571333328; Ania 601 000 318, nonsense")
+    assert one["title"] == "Gleb" and one["phone"] == "+48571333328" and one["type"] == "test"
+    assert one["key"] == "test:571333328" and dial_uri(one["phone"]) == "tel:+48571333328"
+    assert two["title"] == "Ania" and dial_uri(two["phone"]) == "tel:+48601000318"
+    assert local_cards("") == []
+
+
+def _pump(app, n=20):
+    for _ in range(n):
+        app.processEvents()
+
+
+def test_queue_fold_keeps_the_bar_at_the_screen_edge_and_is_remembered():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QApplication
+
+    from dialer_client.overlay import Overlay
+    from dialer_client.widgets import QueueCard
+
+    app = QApplication.instance() or QApplication([])
+    ov = Overlay()
+    assert ov.testAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips)  # tooltips in the never-active window
+    ov.show()
+    ov.show_queue(build()[:2])
+    _pump(app)
+    bottom = ov.geometry().bottom()
+    card = next(c for c in ov.cards if isinstance(c, QueueCard))
+    card._toggle()
+    _pump(app)
+    assert card.is_folded() and ov.geometry().bottom() == bottom
+    ov.show_queue(build()[:2])  # a refresh keeps the operator's choice
+    _pump(app)
+    assert next(c for c in ov.cards if isinstance(c, QueueCard)).is_folded()
+    ov.close()
+
+
+def test_short_screen_shrinks_notices_then_folds_the_queue():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+
+    from dialer_client import theme as T
+    from dialer_client.overlay import Overlay
+    from dialer_client.widgets import QueueCard
+
+    app = QApplication.instance() or QApplication([])
+    ov = Overlay()
+    ov.show()
+    ov.show_queue(build() + build())
+    kinds = ("no_audio", "no_zadarma", "no_line", "server")
+    for k in kinds:
+        ov.show_error(k)
+    _pump(app)
+    room = ov._screen().height() - 2 * T.EDGE
+    assert all(e.compact for e in ov.errors.values())
+    assert next(c for c in ov.cards if isinstance(c, QueueCard)).is_folded()
+    assert ov.height() <= room
+    assert all(e.isVisible() for e in ov.errors.values())
+    for k in kinds:
+        ov.clear_error(k)
+    _pump(app)
+    assert not next(c for c in ov.cards if isinstance(c, QueueCard)).is_folded()  # room again: unfolded
+    assert ov.height() <= room
+    ov.close()

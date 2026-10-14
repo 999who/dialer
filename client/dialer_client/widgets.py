@@ -722,7 +722,8 @@ class ErrorCard(Card):
         title, body, act = ERRORS[kind]
         row, _, self.note = header_row(title, T.ACCENT if info else T.ERROR, note, icon="alert")
         self.body.addLayout(row)
-        self.body.addWidget(text(body, T.serif(18), T.TEXT_STRONG, wrap=True))
+        self.message = text(body, T.serif(18), T.TEXT_STRONG, wrap=True)
+        self.body.addWidget(self.message)
         self.bar = ProgressLine()
         self.bar.hide()
         self.body.addWidget(self.bar)
@@ -737,6 +738,17 @@ class ErrorCard(Card):
         actions.addWidget(hide)
         actions.addStretch(1)
         self.body.addLayout(actions)
+        self.compact = False
+
+    def set_compact(self, on: bool) -> None:
+        """Short form when the screen is full: the message moves into a tooltip on the card."""
+        if on == self.compact:
+            return
+        self.compact = on
+        self.message.setVisible(not on)
+        self.body.setContentsMargins(*((16, 12, 16, 12) if on else (16, 16, 16, 16)))
+        self.body.setSpacing(8 if on else 10)
+        self.setToolTip(_tip(self.message.text()) if on else "")
 
     def set_note(self, note: str) -> None:
         self.note.setText(note)
@@ -1127,6 +1139,7 @@ Q_TYPES = {
     "maps": ("GOOGLE MAPS", T.CLIENT, "#2A2218", _rgba(T.CLIENT, 0.14), "q_maps"),
     "hist": ("NIEZNANY NUMER", T.MUTED2, "#1F2227", "#1F2227", "q_hist"),
     "new": ("NOWY NUMER", T.MUTED, "transparent", "#1F2227", "q_new"),
+    "test": ("KARTA TESTOWA", T.ACCENT, "#1F2A28", _rgba(T.ACCENT, 0.12), "user"),
 }
 
 
@@ -1159,6 +1172,8 @@ def queue_time(it: dict) -> str:
     d = _local(it.get("at", ""))
     if it["reason"] == "now":
         return "teraz"
+    if it["reason"] == "test":
+        return "test"
     if not d:
         return ""
     day = _day(d)
@@ -1174,6 +1189,8 @@ def queue_reason(it: dict) -> str:
     when = ""
     if d:
         when = _day(d) if it.get("all_day") else f"{_day(d)} {d.hour}:{d.minute:02d}"
+    if it["reason"] == "test":
+        return "Tylko w tym komputerze"
     if it["reason"] == "missed":
         return f"Nieodebrane{' ' + str(it['count']) + '×' if it.get('count', 1) > 1 else ''} · {when}"
     if it["reason"] == "overdue":
@@ -1207,6 +1224,8 @@ def queue_row_sub(it: dict) -> str:
         return " · ".join(p for p in (it.get("category"), rating) if p)
     if t == "hist":
         return f"Ostatnio: {last}" if last else ""
+    if t == "test":
+        return "Karta testowa, nie z CRM"
     return "Brak w CRM"
 
 
@@ -1247,12 +1266,13 @@ class _Segments(QWidget):
 
 
 class QueueItem(QWidget):
-    """One entry: a 56 px row that unfolds into the full card on hover (or keyboard focus)."""
+    """One entry: a 56 px row that unfolds into the full card on a click (or Enter)."""
 
     dial = pyqtSignal(str)
     mail = pyqtSignal(str)
     skip = pyqtSignal(str)
     resized = pyqtSignal()
+    opened = pyqtSignal()
 
     def __init__(self, it: dict):
         super().__init__()
@@ -1269,36 +1289,31 @@ class QueueItem(QWidget):
         self.card.hide()
         lay.addWidget(self.row)
         lay.addWidget(self.card)
-        self._want_open = False
-        self._timer = QTimer(self, singleShot=True, interval=140, timeout=self._apply)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
-    # ------------------------------------------------------------ hover
-    def enterEvent(self, e):
-        self._want_open = True
-        self._timer.start()
-        super().enterEvent(e)
+    # ------------------------------------------------------------ click to unfold
+    def mousePressEvent(self, e):
+        e.accept()  # take the press so the release comes here too
 
-    def leaveEvent(self, e):
-        self._want_open = False
-        self._timer.start()
-        super().leaveEvent(e)
+    def mouseReleaseEvent(self, e):
+        # buttons and links take their own clicks; a click anywhere else on the entry folds/unfolds it
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.set_open(self.card.isHidden())
+        super().mouseReleaseEvent(e)
 
-    def focusInEvent(self, e):
-        self.set_open(True)
-        super().focusInEvent(e)
-
-    def focusOutEvent(self, e):
-        self.set_open(False)
-        super().focusOutEvent(e)
-
-    def _apply(self) -> None:
-        self.set_open(self._want_open)
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.set_open(self.card.isHidden())
+        else:
+            super().keyPressEvent(e)
 
     def set_open(self, on: bool) -> None:
-        if self.card.isVisible() == on:
+        if self.card.isHidden() != on:
             return
         self.row.setVisible(not on)
         self.card.setVisible(on)
+        if on:
+            self.opened.emit()
         self.resized.emit()
 
     # ------------------------------------------------------------ parts
@@ -1425,6 +1440,8 @@ class QueueItem(QWidget):
             return " · ".join(p for p in (it.get("category"), "zimny lead") if p)
         if kind == "hist":
             return f"Ostatnio: {last}" if last else ""
+        if kind == "test":
+            return "queue_test w config.toml"
         return "Brak w CRM"
 
     # ------------------------------------------------------------ bodies per type
@@ -1558,6 +1575,10 @@ class QueueItem(QWidget):
     def _body_new(self, body: QVBoxLayout) -> None:
         pass  # "Utwórz leada" / "Przypisz do klienta" need writing to the CRM: not yet
 
+    def _body_test(self, body: QVBoxLayout) -> None:
+        self._add(body, self._meta(["Do sprawdzenia przycisku „Zadzwoń”: otwiera numer w Zadarma. "
+                                    "W CRM tej karty nie ma."]))
+
 
 class QueueCard(Card):
     """Between calls, where the client card stands during a call: who to call now.
@@ -1570,8 +1591,9 @@ class QueueCard(Card):
     mail = pyqtSignal(str)
     skip = pyqtSignal(str)
     resized = pyqtSignal()
+    folded = pyqtSignal(bool)  # by the operator's click only
 
-    def __init__(self, items: list[dict]):
+    def __init__(self, items: list[dict], folded: bool = False):
         super().__init__(bg="#0F1215")
         self.body.setSpacing(12)
         self.items = items
@@ -1609,6 +1631,7 @@ class QueueCard(Card):
             q.mail.connect(self.mail.emit)
             q.skip.connect(self.skip.emit)
             q.resized.connect(self.resized.emit)
+            q.opened.connect(lambda q=q: [r.set_open(False) for r in self.rows if r is not q])
             listing.addWidget(q)
             self.rows.append(q)
         lay.addLayout(listing)
@@ -1621,14 +1644,24 @@ class QueueCard(Card):
                             "border-radius:10px;padding:0 12px;")
             lay.addWidget(m)
         if items:
-            hint = text("Najedź na kartę, aby zobaczyć szczegóły", T.sans(11), T.FAINT)
+            hint = text("Kliknij kartę, aby zobaczyć szczegóły", T.sans(11), T.FAINT)
             hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lay.addWidget(hint)
         self.body.addWidget(self.content)
+        if folded:
+            self.set_folded(True)
+
+    def is_folded(self) -> bool:
+        return self.content.isHidden()
+
+    def set_folded(self, on: bool) -> None:
+        if self.is_folded() == on:
+            return
+        self.content.setVisible(not on)
+        set_button_fg(self.fold, "chev_up" if on else "chev", T.FAINT, 14)
+        self.fold.setToolTip("Rozwiń kolejkę" if on else "Zwiń kolejkę")
+        self.resized.emit()
 
     def _toggle(self) -> None:
-        folded = self.content.isVisible()
-        self.content.setVisible(not folded)
-        set_button_fg(self.fold, "chev_up" if folded else "chev", T.FAINT, 14)
-        self.fold.setToolTip("Rozwiń kolejkę" if folded else "Zwiń kolejkę")
-        self.resized.emit()
+        self.set_folded(not self.is_folded())
+        self.folded.emit(self.is_folded())

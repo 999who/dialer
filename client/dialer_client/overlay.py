@@ -67,6 +67,9 @@ class Overlay(QWidget):
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        # the window never becomes active (no focus stealing), and Qt shows tooltips of inactive
+        # windows only with this attribute
+        self.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips)
         self.corner = corner if corner in CORNERS else "bottom-right"
         self.hint_seconds = hint_seconds
         self.summary_seconds = summary_seconds
@@ -75,6 +78,9 @@ class Overlay(QWidget):
         self.errors: dict[str, ErrorCard] = {}
         self.cards: list[Card] = []  # newest last
         self.dismissed_errors: set[str] = set()
+        self.queue_folded = False  # the operator folded the queue; kept across refreshes
+        self._auto_folded = False  # folded by us because the screen was full
+        self.stack_beside = False  # expanded: notices beside the panel, not above it (short screens)
 
         self.root = QVBoxLayout(self)
         self.root.setContentsMargins(0, 0, 0, 0)
@@ -121,7 +127,9 @@ class Overlay(QWidget):
                 lay.removeWidget(w)
         top = self.corner.startswith("top")
         if self.expanded:
-            for w in ((self.panel, self.stack_host) if top else (self.stack_host, self.panel)):
+            col = (self.panel,) if self.stack_beside else \
+                (self.panel, self.stack_host) if top else (self.stack_host, self.panel)
+            for w in col:
                 self.col_layout.addWidget(w)
             for w in ((self.col, self.side) if self.corner.endswith("left") else (self.side, self.col)):
                 self.row_layout.addWidget(w)
@@ -147,15 +155,15 @@ class Overlay(QWidget):
             self.stack.addWidget(c)
         while self.side_layout.count():  # old stretch
             self.side_layout.takeAt(0)
+        beside = self.expanded and self.stack_beside
         if self.expanded:
             # level with the panel's edge at the screen corner: bottom in a bottom corner, top in a top one
             if not top:
                 self.side_layout.addStretch(1)
-            for c in clients:
-                self.side_layout.addWidget(c)
+            for w in ([self.stack_host] if beside else []) + clients:
+                self.side_layout.addWidget(w)
             if top:
                 self.side_layout.addStretch(1)
-        self.side.setVisible(self.expanded and bool(clients))
         for i, c in enumerate(reversed(self.cards)):
             eff = c.graphicsEffect()
             if not isinstance(eff, QGraphicsOpacityEffect):
@@ -164,14 +172,78 @@ class Overlay(QWidget):
             eff.setOpacity(1.0 if i == 0 or isinstance(c, (ErrorCard, *SIDE)) else 0.45)
         self.stack_host.setVisible(any(not (self.expanded and isinstance(c, (HintCard, *SIDE)))
                                        for c in self.cards))
+        self.side.setVisible(self.expanded and (bool(clients) or (beside and not self.stack_host.isHidden())))
         QTimer.singleShot(0, self.reposition)
 
-    def reposition(self) -> None:
+    def _screen(self):
+        return (self.screen() or QApplication.primaryScreen()).availableGeometry()
+
+    def _needed_height(self) -> int:
+        # widgets just hidden or shown only post a layout request: drop the cached size hints now
+        for w in self.findChildren(QWidget):
+            w.updateGeometry()
+        self.root.activate()
+        # size hints don't count wrapped text (a notice's message, a hint): add what those cards
+        # really need at their width; expanded, the client card / queue stand in their own column
+        extra = sum(max(0, c.heightForWidth(c.width() or T.WIDGET_W) - c.sizeHint().height())
+                    for c in self.cards
+                    if c.isVisibleTo(self) and c.hasHeightForWidth() and not (self.expanded and isinstance(c, SIDE)))
+        return self.sizeHint().height() + extra
+
+    def reposition(self, fit: bool = True) -> None:
+        """Size to the content and pin to the corner, making room when the screen is too short.
+
+        In this order, until everything fits: notices lose their message text (it stays in a tooltip);
+        expanded, the notices move from above the panel to the column beside it; the queue folds;
+        the oldest notices hide until there is room again. fit=False (the operator unfolded a queue
+        entry) never folds the queue: that would hide the entry they just opened.
+        """
+        room = self._screen().height() - 2 * T.EDGE
+        errors = [c for c in self.cards if isinstance(c, ErrorCard)]  # oldest first
+        queue = next((c for c in self.cards if isinstance(c, QueueCard)), None)
+        for e in errors:
+            e.set_compact(False)
+            e.show()
+        if fit:
+            if queue and self._auto_folded and not self.queue_folded:
+                self._fold(queue, False)
+            self._auto_folded = False
+        if errors and self._needed_height() > room:
+            for e in errors:
+                e.set_compact(True)
+        if errors and self.expanded and not self.stack_beside and self._needed_height() > room:
+            self.stack_beside = True
+            self._layout()  # runs reposition again with the new layout
+            return
+        if fit and queue and not queue.is_folded() and self._needed_height() > room:
+            self._fold(queue, True)
+            self._auto_folded = True
+        for e in errors:
+            if self._needed_height() <= room:
+                break
+            e.hide()  # back as soon as there is room (every reposition starts with all shown)
         self.adjustSize()
-        scr = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        self._anchor()
+
+    @staticmethod
+    def _fold(queue: QueueCard, on: bool) -> None:
+        queue.blockSignals(True)  # its resized signal would start another reposition and undo this one
+        queue.set_folded(on)
+        queue.blockSignals(False)
+
+    def _anchor(self) -> None:
+        """Keep the corner side fixed: a bottom-corner window grows and shrinks upwards, with the bar in place."""
+        scr = self._screen()
         x = scr.left() + T.EDGE if self.corner.endswith("left") else scr.right() - self.width() - T.EDGE + 1
         y = scr.top() + T.EDGE if self.corner.startswith("top") else scr.bottom() - self.height() - T.EDGE + 1
-        self.move(x, y)
+        if (x, y) != (self.x(), self.y()):
+            self.move(x, y)
+
+    def resizeEvent(self, e):
+        # the layout resizes the window from its top-left corner; move it back at once, before the
+        # next reposition, so folding the queue doesn't lift the bar off the screen edge
+        super().resizeEvent(e)
+        self._anchor()
 
     def set_corner(self, corner: str) -> None:
         self.corner = corner
@@ -179,6 +251,7 @@ class Overlay(QWidget):
 
     def set_expanded(self, on: bool) -> None:
         self.expanded = on
+        self.stack_beside = False  # above the panel again, if it fits
         self.bar.setVisible(not on)
         self.panel.setVisible(on)
         # in the expanded panel the current hint lives inside the panel, only errors/summary stack outside
@@ -274,12 +347,17 @@ class Overlay(QWidget):
     def show_queue(self, items: list[dict]) -> None:
         """Who to call next; between calls only, in the client card's place."""
         self.clear_queue(restack=False)
-        card = QueueCard(items)
+        card = QueueCard(items, folded=self.queue_folded)
         card.dial.connect(self.dial.emit)
         card.mail.connect(self.mail.emit)
         card.skip.connect(self.queue_skip.emit)
-        card.resized.connect(lambda: QTimer.singleShot(0, self.reposition))
+        card.folded.connect(self._queue_folded)
+        card.resized.connect(lambda: QTimer.singleShot(0, lambda: self.reposition(fit=False)))
         self._push(card)
+
+    def _queue_folded(self, on: bool) -> None:
+        self.queue_folded = on
+        self._auto_folded = False
 
     def clear_queue(self, restack: bool = True) -> None:
         for c in [c for c in self.cards if isinstance(c, QueueCard)]:

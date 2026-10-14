@@ -57,6 +57,7 @@ class Config:
     crm_key: str = CRM_KEY          # publishable (anon) key: public by design, access is the operator's
     crm_sip: str = ""               # Zadarma extension of this PC (e.g. "100"); empty = any
     own_numbers: str = "609037902, 525275052"  # the company's own numbers: never a client card
+    queue_test: str = ""            # local test cards on top of the queue, e.g. "Gleb +48571333328"
 
 
 def needs_setup(cfg: Config) -> bool:
