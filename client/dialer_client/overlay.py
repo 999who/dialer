@@ -14,9 +14,10 @@ from PyQt6.QtCore import QPoint, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QGraphicsOpacityEffect, QHBoxLayout, QVBoxLayout, QWidget
 
 from . import theme as T
-from .widgets import Card, ClientCard, ErrorCard, ExpandedPanel, HintCard, StatusBar, SummaryCard
+from .widgets import Card, ClientCard, ErrorCard, ExpandedPanel, HintCard, QueueCard, StatusBar, SummaryCard
 
 MAX_STACK = 3
+SIDE = (ClientCard, QueueCard)  # next to the bar while collapsed, beside the panel while expanded
 CORNERS = {"bottom-right": "Prawy dolny róg", "bottom-left": "Lewy dolny róg",
            "top-right": "Prawy górny róg", "top-left": "Lewy górny róg"}
 
@@ -49,6 +50,10 @@ class Overlay(QWidget):
     settings_requested = pyqtSignal(QPoint)
     save_crm = pyqtSignal(dict)
     open_transcript = pyqtSignal(dict)
+    client_closed = pyqtSignal()
+    dial = pyqtSignal(str)         # tel: link of a queue entry
+    mail = pyqtSignal(str)         # mailto: link of a queue entry without a phone
+    queue_skip = pyqtSignal(str)   # key of the skipped queue entry
 
     def __init__(self, corner: str = "bottom-right", hint_seconds: float = 20, summary_seconds: float = 45,
                  opacity: float = 0.96, taskbar: bool = True):
@@ -133,10 +138,10 @@ class Overlay(QWidget):
         for c in self.cards:
             self.stack.removeWidget(c)
             self.side_layout.removeWidget(c)
-        clients = [c for c in self.cards if isinstance(c, ClientCard)]
-        # newest card next to the bar; the client card is always the closest one
+        clients = [c for c in self.cards if isinstance(c, SIDE)]
+        # newest card next to the bar; the client card (or the queue) is always the closest one
         # (expanded: it stands beside the panel instead)
-        near = [c for c in self.cards if not isinstance(c, ClientCard)] + ([] if self.expanded else clients)
+        near = [c for c in self.cards if not isinstance(c, SIDE)] + ([] if self.expanded else clients)
         ordered = list(reversed(near)) if top else near
         for c in ordered:
             self.stack.addWidget(c)
@@ -156,8 +161,8 @@ class Overlay(QWidget):
             if not isinstance(eff, QGraphicsOpacityEffect):
                 eff = QGraphicsOpacityEffect(c)
                 c.setGraphicsEffect(eff)
-            eff.setOpacity(1.0 if i == 0 or isinstance(c, (ErrorCard, ClientCard)) else 0.45)
-        self.stack_host.setVisible(any(not (self.expanded and isinstance(c, (HintCard, ClientCard)))
+            eff.setOpacity(1.0 if i == 0 or isinstance(c, (ErrorCard, *SIDE)) else 0.45)
+        self.stack_host.setVisible(any(not (self.expanded and isinstance(c, (HintCard, *SIDE)))
                                        for c in self.cards))
         QTimer.singleShot(0, self.reposition)
 
@@ -197,7 +202,7 @@ class Overlay(QWidget):
         """Transcript, hints and summaries go; errors stay (they describe the current state)."""
         self.clear_transcript()
         self.panel.set_hint(None)
-        for c in [c for c in self.cards if not isinstance(c, ErrorCard)]:
+        for c in [c for c in self.cards if not isinstance(c, (ErrorCard, QueueCard))]:
             self._remove(c)
 
     def _pause(self, paused: bool) -> None:
@@ -211,8 +216,8 @@ class Overlay(QWidget):
     # ------------------------------------------------------------ cards
     def _push(self, card: Card) -> None:
         self.cards.append(card)
-        # keep at most MAX_STACK hints/summaries (errors and the client card don't count)
-        regular = [c for c in self.cards if not isinstance(c, (ErrorCard, ClientCard))]
+        # keep at most MAX_STACK hints/summaries (errors, the client card and the queue don't count)
+        regular = [c for c in self.cards if not isinstance(c, (ErrorCard, *SIDE))]
         for old in regular[:-MAX_STACK]:
             self._remove(old, restack=False)
         if self.expanded and isinstance(card, HintCard):
@@ -258,9 +263,29 @@ class Overlay(QWidget):
     def show_client(self, data: dict) -> None:
         """The CRM card of the caller; replaces the previous one and stays until the next call."""
         self.clear_client(restack=False)
+        self.clear_queue(restack=False)
         card = ClientCard(data)
-        card.closed.connect(lambda c=card: self._remove(c))
+        card.closed.connect(lambda c=card: (self._remove(c), self.client_closed.emit()))
         self._push(card)
+
+    def has_client(self) -> bool:
+        return any(isinstance(c, ClientCard) for c in self.cards)
+
+    def show_queue(self, items: list[dict]) -> None:
+        """Who to call next; between calls only, in the client card's place."""
+        self.clear_queue(restack=False)
+        card = QueueCard(items)
+        card.dial.connect(self.dial.emit)
+        card.mail.connect(self.mail.emit)
+        card.skip.connect(self.queue_skip.emit)
+        card.resized.connect(lambda: QTimer.singleShot(0, self.reposition))
+        self._push(card)
+
+    def clear_queue(self, restack: bool = True) -> None:
+        for c in [c for c in self.cards if isinstance(c, QueueCard)]:
+            self._remove(c, restack=False)
+        if restack:
+            self._restack()
 
     def clear_client(self, restack: bool = True) -> None:
         for c in [c for c in self.cards if isinstance(c, ClientCard)]:

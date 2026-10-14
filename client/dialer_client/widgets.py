@@ -1114,3 +1114,521 @@ class ExpandedPanel(Card):
 
     def set_latency(self, ms: int) -> None:
         self.lat_lbl.setText(T.fmt_latency(ms))
+
+
+# ------------------------------------------------------------------ call queue (between calls)
+QUEUE_VISIBLE = 6
+MISSED = "#FF8A8A"
+# tag, colour, tile background, tag background, icon
+Q_TYPES = {
+    "client": ("KLIENT CRM", T.ACCENT, "#1F2A28", _rgba(T.ACCENT, 0.12), "q_client"),
+    "lead": ("LEAD", T.OPERATOR, "#1B2433", _rgba(T.OPERATOR, 0.14), "q_lead"),
+    "google": ("KONTAKT GOOGLE", T.TEXT_SOFT, "#1F2227", "#1F2227", "user"),
+    "maps": ("GOOGLE MAPS", T.CLIENT, "#2A2218", _rgba(T.CLIENT, 0.14), "q_maps"),
+    "hist": ("NIEZNANY NUMER", T.MUTED2, "#1F2227", "#1F2227", "q_hist"),
+    "new": ("NOWY NUMER", T.MUTED, "transparent", "#1F2227", "q_new"),
+}
+
+
+def _local(iso: str) -> datetime | None:
+    try:
+        d = datetime.fromisoformat((iso or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return d.astimezone() if d.tzinfo else d
+
+
+def _day(d: datetime) -> str:
+    days = (date.today() - d.date()).days
+    return "dziś" if days == 0 else "wczoraj" if days == 1 else d.strftime("%d.%m")
+
+
+def _zl(v) -> str:
+    return f"{int(round(float(v))):,} zł".replace(",", " ") if v else ""
+
+
+def _rozmowy(n: int) -> str:
+    if n == 1:
+        return "1 wcześniejsza rozmowa"
+    few = n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14)
+    return f"{n} wcześniejsze rozmowy" if few else f"{n} wcześniejszych rozmów"
+
+
+def queue_time(it: dict) -> str:
+    """The short time on the compact row: 'teraz', '10:05', 'wcz. 16:40', '12.09'."""
+    d = _local(it.get("at", ""))
+    if it["reason"] == "now":
+        return "teraz"
+    if not d:
+        return ""
+    day = _day(d)
+    hm = f"{d.hour}:{d.minute:02d}"
+    if it.get("all_day"):
+        return day
+    return hm if day == "dziś" else f"wcz. {hm}" if day == "wczoraj" else day
+
+
+def queue_reason(it: dict) -> str:
+    """'Nieodebrane 2× · wczoraj 16:40', 'Zaplanowane · dziś 11:00', 'Zaległe · 12.09'."""
+    d = _local(it.get("at", ""))
+    when = ""
+    if d:
+        when = _day(d) if it.get("all_day") else f"{_day(d)} {d.hour}:{d.minute:02d}"
+    if it["reason"] == "missed":
+        return f"Nieodebrane{' ' + str(it['count']) + '×' if it.get('count', 1) > 1 else ''} · {when}"
+    if it["reason"] == "overdue":
+        return f"Zaległe · {d.strftime('%d.%m') if d else ''}"
+    return f"Zaplanowane · {when}"
+
+
+def queue_title(it: dict) -> str:
+    return it.get("title") or ("Nieznany numer" if it["type"] == "hist" else mask_phone(it.get("phone", "")) or
+                               "Bez numeru")
+
+
+def queue_row_sub(it: dict) -> str:
+    t = it["type"]
+    last = (it.get("calls") or [{}])[0].get("title", "")
+    if t == "client":
+        h = it.get("hours") or {}
+        parts = [it.get("person") or it.get("city") or ""]
+        if h.get("limit"):
+            parts.append(f"abonament {_hours(h['left'])}" if h.get("used", 0) <= h["limit"]
+                         else f"abonament +{_hours(h['used'] - h['limit'])}")
+        return " · ".join(p for p in parts if p)
+    if t == "lead":
+        if not it.get("phone"):
+            return " · ".join(p for p in ("brak telefonu", it.get("email")) if p)
+        return " · ".join(p for p in ((it.get("stage") or {}).get("name", ""), _zl(it.get("value"))) if p)
+    if t == "google":
+        return f"Ostatnio: {last}" if last else it.get("org") or "Kontakt z Google"
+    if t == "maps":
+        rating = f"★ {str(it['rating']).replace('.', ',')} ({it.get('reviews', 0)})" if it.get("rating") else ""
+        return " · ".join(p for p in (it.get("category"), rating) if p)
+    if t == "hist":
+        return f"Ostatnio: {last}" if last else ""
+    return "Brak w CRM"
+
+
+class _Tile(QLabel):
+    def __init__(self, kind: str, size: int):
+        super().__init__()
+        _, color, bg, _, icon = Q_TYPES[kind]
+        self.setFixedSize(size, size)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setPixmap(T.pixmap(icon, color, 18 if size >= 40 else 15))
+        border = "1px dashed #3A3E45" if kind == "new" else "0"
+        self.setStyleSheet(f"background:{bg};border:{border};border-radius:{12 if size >= 40 else 10}px;")
+
+
+class _Segments(QWidget):
+    """'etap 3/5' as short bars, the first `on` lit in the type colour."""
+
+    def __init__(self, total: int, on: float, color: str):
+        super().__init__()
+        self.total, self.on, self.color = max(1, total), on, color
+        self.setFixedHeight(6)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        gap = 2
+        w = (self.width() - gap * (self.total - 1)) / self.total
+        for i in range(self.total):
+            r = QRectF(i * (w + gap), 0, w, self.height())
+            p.setBrush(QColor("#252930"))
+            p.drawRoundedRect(r, 2, 2)
+            fill = max(0.0, min(1.0, self.on - i))
+            if fill:
+                p.setBrush(QColor(self.color))
+                p.drawRoundedRect(QRectF(r.x(), 0, r.width() * fill, r.height()), 2, 2)
+
+
+class QueueItem(QWidget):
+    """One entry: a 56 px row that unfolds into the full card on hover (or keyboard focus)."""
+
+    dial = pyqtSignal(str)
+    mail = pyqtSignal(str)
+    skip = pyqtSignal(str)
+    resized = pyqtSignal()
+
+    def __init__(self, it: dict):
+        super().__init__()
+        from .crm import dial_uri  # widgets stay importable without the CRM module's deps
+        self.it = it
+        self.uri = dial_uri(it.get("phone", ""))
+        self.mail_uri = f"mailto:{it['email']}" if it.get("email") else ""
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self.row = self._row()
+        self.card = self._card()
+        self.card.hide()
+        lay.addWidget(self.row)
+        lay.addWidget(self.card)
+        self._want_open = False
+        self._timer = QTimer(self, singleShot=True, interval=140, timeout=self._apply)
+
+    # ------------------------------------------------------------ hover
+    def enterEvent(self, e):
+        self._want_open = True
+        self._timer.start()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._want_open = False
+        self._timer.start()
+        super().leaveEvent(e)
+
+    def focusInEvent(self, e):
+        self.set_open(True)
+        super().focusInEvent(e)
+
+    def focusOutEvent(self, e):
+        self.set_open(False)
+        super().focusOutEvent(e)
+
+    def _apply(self) -> None:
+        self.set_open(self._want_open)
+
+    def set_open(self, on: bool) -> None:
+        if self.card.isVisible() == on:
+            return
+        self.row.setVisible(not on)
+        self.card.setVisible(on)
+        self.resized.emit()
+
+    # ------------------------------------------------------------ parts
+    def _call_buttons(self, compact: bool) -> list[QWidget]:
+        it = self.it
+        if compact:
+            if self.uri:
+                b = button(icon="phone", bg=_rgba(T.ACCENT, 0.14), fg=T.ACCENT, w=34, h=34, radius=17, icon_size=15,
+                           tip=f"Zadzwoń · {mask_phone(it['phone']) or it['phone']}")
+                b.clicked.connect(lambda: self.dial.emit(self.uri))
+                return [b]
+            if self.mail_uri:
+                b = button(icon="mail", fg=T.MUTED, border="#3A3E45", w=34, h=34, radius=17, icon_size=15,
+                           tip="Brak telefonu — napisz e-mail")
+                b.setStyleSheet(b.styleSheet().replace("1px solid", "1px dashed"))
+                b.clicked.connect(lambda: self.mail.emit(self.mail_uri))
+                return [b]
+            return []
+        out: list[QWidget] = []
+        if self.uri:
+            label = mask_phone(it["phone"]) or it["phone"]
+            b = button(f"Zadzwoń · {label}", icon="phone", bg=T.ACCENT, fg=T.ACCENT_INK, h=40, radius=10,
+                       weight=700, icon_size=15)
+            b.setFont(T.sans(13, 700))
+            b.clicked.connect(lambda: self.dial.emit(self.uri))
+            out.append(b)
+        else:
+            none = text("brak telefonu", T.sans(13), T.MUTED)
+            none.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            none.setFixedHeight(40)
+            none.setStyleSheet(f"color:{T.MUTED};background:transparent;border:1px dashed #3A3E45;border-radius:10px;")
+            out.append(none)
+            if self.mail_uri:
+                m = button("Napisz e-mail", fg=T.TEXT, border=T.BORDER_SOFT, h=40, radius=10)
+                m.setFont(T.sans(13, 600))
+                m.clicked.connect(lambda: self.mail.emit(self.mail_uri))
+                out.append(m)
+        return out
+
+    def _row(self) -> QWidget:
+        it = self.it
+        _, color, *_ = Q_TYPES[it["type"]]
+        w = QFrame()
+        w.setObjectName("qrow")
+        w.setFixedHeight(56)
+        w.setStyleSheet(f"#qrow{{background:{T.SURFACE_IN_PANEL};border:1px solid #22262C;border-radius:12px;}}")
+        row = QHBoxLayout(w)
+        row.setContentsMargins(10, 0, 8, 0)
+        row.setSpacing(10)
+        row.addWidget(_Tile(it["type"], 32))
+        main = QVBoxLayout()
+        main.setSpacing(1)
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        top.addWidget(ElidedLabel(queue_title(it), T.sans(14, 600), T.TEXT), 1)
+        if it.get("calls_back"):
+            top.addWidget(pill("ODDZWANIA", T.CLIENT, _rgba(T.CLIENT, 0.14), 9, 6))
+        main.addLayout(top)
+        sub = queue_row_sub(it)
+        if sub:
+            main.addWidget(ElidedLabel(sub, T.sans(12), T.MUTED))
+        row.addLayout(main, 1)
+        row.addWidget(text(queue_time(it), T.sans(11), MISSED if it["reason"] == "missed" else T.OPERATOR))
+        for b in self._call_buttons(compact=True):
+            row.addWidget(b)
+        return w
+
+    def _card(self) -> QWidget:
+        it = self.it
+        kind = it["type"]
+        tag, color, *_ = Q_TYPES[kind]
+        _, _, _, tag_bg, _ = Q_TYPES[kind]
+        c = Card(bg=T.SURFACE_IN_PANEL, border="#2F343B", radius=14, width=0)
+        c.body.setContentsMargins(14, 14, 14, 14)
+        c.body.setSpacing(12)
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        top.addWidget(pill(tag, color, tag_bg, 10, 8))
+        top.addStretch(1)
+        top.addWidget(text(queue_reason(it), T.sans(11, 600), MISSED if it["reason"] == "missed" else T.OPERATOR))
+        c.body.addLayout(top)
+
+        head = QHBoxLayout()
+        head.setSpacing(12)
+        head.addWidget(_Tile(kind, 40))
+        who = QVBoxLayout()
+        who.setSpacing(1)
+        title = queue_title(it)
+        t = ElidedLabel(title, T.sans(17, 700, -2), T.TEXT_STRONG)
+        t.setToolTip(_tip(title))
+        who.addWidget(t)
+        sub = self._card_sub()
+        if sub:
+            who.addWidget(ElidedLabel(sub, T.sans(13), T.MUTED2))
+        head.addLayout(who, 1)
+        c.body.addLayout(head)
+
+        getattr(self, f"_body_{kind}")(c.body)
+
+        acts = QHBoxLayout()
+        acts.setSpacing(8)
+        for i, b in enumerate(self._call_buttons(compact=False)):
+            acts.addWidget(b, 1 if i == 0 else 0)
+        skip = button(icon="skip", fg=T.MUTED2, border=T.BORDER_SOFT, w=40, h=40, radius=10, icon_size=15,
+                      tip="Pomiń, przenieś na koniec kolejki")
+        skip.clicked.connect(lambda: self.skip.emit(self.it["key"]))
+        acts.addWidget(skip)
+        c.body.addLayout(acts)
+        return c
+
+    def _card_sub(self) -> str:
+        it = self.it
+        kind = it["type"]
+        last = (it.get("calls") or [{}])[0].get("title", "")
+        if kind == "client":
+            return " · ".join(p for p in (it.get("person"), it.get("position"), it.get("city")) if p)
+        if kind == "lead":
+            return " · ".join(p for p in (_zl(it.get("value")), f"lead z: {it['source']}" if it.get("source") else "")
+                              if p)
+        if kind == "google":
+            org = it.get("org") or "Bez organizacji"
+            return f"{org} · ostatnio: {last}" if last else org
+        if kind == "maps":
+            return " · ".join(p for p in (it.get("category"), "zimny lead") if p)
+        if kind == "hist":
+            return f"Ostatnio: {last}" if last else ""
+        return "Brak w CRM"
+
+    # ------------------------------------------------------------ bodies per type
+    @staticmethod
+    def _meta(parts: list[str]) -> QWidget | None:
+        parts = [p for p in parts if p]
+        if not parts:
+            return None
+        lb = QLabel("   ·   ".join(parts))
+        lb.setFont(T.sans(12))
+        lb.setWordWrap(True)
+        lb.setTextFormat(Qt.TextFormat.RichText)
+        lb.setStyleSheet(f"color:{T.MUTED2};background:transparent;")
+        lb.setOpenExternalLinks(True)
+        return lb
+
+    @staticmethod
+    def _history(label: str, calls: list[dict]) -> QVBoxLayout | None:
+        if not calls:
+            return None
+        box = QVBoxLayout()
+        box.setSpacing(6)
+        box.addWidget(text(label, T.sans(10, 700, 8), T.MUTED))
+        for call in calls:
+            d = _local(call["at"])
+            r = QHBoxLayout()
+            r.setSpacing(10)
+            when = text(d.strftime("%d.%m") if d else "", T.sans(13), T.FAINT)
+            when.setFixedWidth(38)
+            r.addWidget(when, 0, Qt.AlignmentFlag.AlignTop)
+            tip = call["title"] + (f"\n\n{call['summary']}" if call.get("summary") else "")
+            r.addWidget(ClampLabel(call["title"], T.sans(13), T.TEXT, lines=1, tip=tip), 1)
+            box.addLayout(r)
+        return box
+
+    def _add(self, body: QVBoxLayout, part) -> None:
+        if isinstance(part, QWidget):
+            body.addWidget(part)
+        elif part is not None:
+            body.addLayout(part)
+
+    def _body_client(self, body: QVBoxLayout) -> None:
+        it = self.it
+        h = it.get("hours") or {}
+        if it.get("subscriber") or h.get("limit"):
+            r = QHBoxLayout()
+            r.setSpacing(10)
+            r.addWidget(pill("ABONAMENT", T.ACCENT, _rgba(T.ACCENT, 0.12)))
+            if h.get("limit"):
+                over = h.get("used", 0) > h["limit"]
+                share = h["left"] / h["limit"] if h["limit"] else 0
+                color = T.ERROR if over or share <= 0.10 else T.CLIENT if share <= 0.30 else T.ACCENT
+                r.addWidget(HourCells(h["limit"], h["left"], color, over), 1)
+                r.addWidget(text(("+" + _hours(h["used"] - h["limit"])) if over else _hours(h["left"]),
+                                 T.sans(12, 700), color))
+            else:
+                r.addStretch(1)
+            body.addLayout(r)
+        tickets, deals = it.get("tickets_open"), it.get("deals_open")
+        self._add(body, self._meta([
+            f"<b style='color:{T.TEXT}'>{tickets}</b> {'zgłoszenie otwarte' if tickets == 1 else 'zgłoszenia otwarte' if 1 < tickets < 5 else 'zgłoszeń otwartych'}" if tickets else "",
+            f"<b style='color:{T.TEXT}'>{deals}</b> {'szansa w toku' if deals == 1 else 'szanse w toku'}" if deals else ""]))
+        if it.get("next_note"):
+            self._add(body, self._note())
+        self._add(body, self._history("OSTATNIE ROZMOWY", it.get("calls") or []))
+
+    def _note(self) -> QWidget:
+        it = self.it
+        d = _local(it.get("next_at", ""))
+        when = (_day(d) if it.get("all_day") or (d and (d.hour, d.minute) == (0, 0))
+                else f"{_day(d)} {d.hour}:{d.minute:02d}") if d else ""
+        box = Card(bg=T.SURFACE2, border=T.SURFACE2, radius=10, width=0)
+        box.body.setContentsMargins(10, 9, 10, 9)
+        box.body.setSpacing(3)
+        box.body.addWidget(text(f"Następny kontakt · {when}" if when else "Następny kontakt", T.sans(11, 700),
+                                T.OPERATOR))
+        box.body.addWidget(ClampLabel(it["next_note"], T.sans(13), T.TEXT, lines=2))
+        return box
+
+    def _body_lead(self, body: QVBoxLayout) -> None:
+        it = self.it
+        st = it.get("stage") or {}
+        if st.get("total"):
+            r = QHBoxLayout()
+            r.setSpacing(10)
+            r.addWidget(_Segments(st["total"], st["index"], T.OPERATOR), 1)
+            r.addWidget(text(f"etap {st['index']}/{st['total']} · {st['name']}", T.sans(12), T.MUTED2))
+            body.addLayout(r)
+        if it.get("next_note"):
+            self._add(body, self._note())
+        offer = ""
+        if it.get("offer_sent"):
+            d = _local(it["offer_sent"])
+            opens = it.get("offer_opens")
+            offer = f"Oferta wysłana {d.strftime('%d.%m') if d else ''}" + \
+                (f" · otwarta {opens}×" if opens else " · jeszcze nieotwarta" if opens == 0 else "")
+        self._add(body, self._meta([offer, _rozmowy(it["prior_calls"]) if it.get("prior_calls") else "",
+                                    it.get("email") if it.get("phone") else ""]))
+        if not it.get("phone") and it.get("email"):
+            self._add(body, self._meta([it["email"]]))
+
+    def _body_google(self, body: QVBoxLayout) -> None:
+        self._add(body, self._history("HISTORIA PO NUMERZE", self.it.get("calls") or []))
+        self._add(body, self._meta([self.it.get("email", "")]))
+
+    def _body_maps(self, body: QVBoxLayout) -> None:
+        it = self.it
+        if it.get("calls_back"):
+            box = QFrame()
+            box.setObjectName("cb")
+            box.setStyleSheet(f"#cb{{background:{_rgba(T.CLIENT, 0.12)};border:1px solid {_rgba(T.CLIENT, 0.3)};"
+                              "border-radius:10px;}")
+            r = QHBoxLayout(box)
+            r.setContentsMargins(10, 8, 10, 8)
+            r.setSpacing(8)
+            r.addWidget(IconLabel("back", "#FFC68A", 14))
+            r.addWidget(text("Oddzwania po zimnym telefonie", T.sans(13, 600), "#FFC68A"), 1)
+            d = _local(it.get("we_called_at", ""))
+            if d:
+                r.addWidget(text(f"dzwoniliśmy {d.strftime('%d.%m')}", T.sans(11), T.MUTED2))
+            body.addWidget(box)
+        rating = (f"<b style='color:{T.CLIENT}'>★ {str(it['rating']).replace('.', ',')}</b> "
+                  f"({it.get('reviews', 0)} opinii)") if it.get("rating") else ""
+        site = f"<a href='{escape(it['website'])}' style='color:{T.TEXT_SOFT}'>Strona www ↗</a>" \
+            if it.get("website") else ""
+        self._add(body, self._meta([rating, escape(it.get("address", "")), site]))
+
+    def _body_hist(self, body: QVBoxLayout) -> None:
+        self._add(body, self._history("PODSUMOWANIA ROZMÓW Z TEGO NUMERU", self.it.get("calls") or []))
+
+    def _body_new(self, body: QVBoxLayout) -> None:
+        pass  # "Utwórz leada" / "Przypisz do klienta" need writing to the CRM: not yet
+
+
+class QueueCard(Card):
+    """Between calls, where the client card stands during a call: who to call now.
+
+    At most 6 entries are shown, the most urgent first; the rest wait ("+N w kolejce") and move up
+    when one is called or skipped. Skipping moves an entry to the end.
+    """
+
+    dial = pyqtSignal(str)
+    mail = pyqtSignal(str)
+    skip = pyqtSignal(str)
+    resized = pyqtSignal()
+
+    def __init__(self, items: list[dict]):
+        super().__init__(bg="#0F1215")
+        self.body.setSpacing(12)
+        self.items = items
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        head.addWidget(text("Kolejka", T.sans(16, 700), T.TEXT_STRONG))
+        n = QLabel(str(len(items)))
+        n.setFont(T.sans(11, 700))
+        n.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        n.setMinimumWidth(18)
+        n.setFixedHeight(18)
+        n.setStyleSheet(f"color:{T.TEXT_SOFT};background:#1F2329;border-radius:9px;padding:0 5px;")
+        head.addWidget(n)
+        if len(items) > QUEUE_VISIBLE:
+            head.addWidget(text(f"widoczne {QUEUE_VISIBLE} najważniejszych", T.sans(12), T.MUTED))
+        head.addStretch(1)
+        self.fold = button(icon="chev", fg=T.FAINT, w=28, h=28, radius=8, icon_size=14, tip="Zwiń kolejkę")
+        self.fold.clicked.connect(self._toggle)
+        head.addWidget(self.fold)
+        self.body.addLayout(head)
+
+        self.content = QWidget()
+        lay = QVBoxLayout(self.content)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(12)
+        if not items:
+            lay.addWidget(text("Nie ma teraz nikogo do oddzwonienia ani zaplanowanych kontaktów.", T.sans(13),
+                               T.MUTED, wrap=True))
+        listing = QVBoxLayout()
+        listing.setSpacing(6)
+        self.rows: list[QueueItem] = []
+        for it in items[:QUEUE_VISIBLE]:
+            q = QueueItem(it)
+            q.dial.connect(self.dial.emit)
+            q.mail.connect(self.mail.emit)
+            q.skip.connect(self.skip.emit)
+            q.resized.connect(self.resized.emit)
+            listing.addWidget(q)
+            self.rows.append(q)
+        lay.addLayout(listing)
+        more = len(items) - QUEUE_VISIBLE
+        if more > 0:
+            m = QLabel(f"<b style='color:{T.TEXT_SOFT}'>+{more} w kolejce</b> · pojawią się po obsłużeniu powyższych")
+            m.setFont(T.sans(12))
+            m.setFixedHeight(36)
+            m.setStyleSheet(f"color:{T.MUTED};background:transparent;border:1px dashed {T.BORDER_SOFT};"
+                            "border-radius:10px;padding:0 12px;")
+            lay.addWidget(m)
+        if items:
+            hint = text("Najedź na kartę, aby zobaczyć szczegóły", T.sans(11), T.FAINT)
+            hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lay.addWidget(hint)
+        self.body.addWidget(self.content)
+
+    def _toggle(self) -> None:
+        folded = self.content.isVisible()
+        self.content.setVisible(not folded)
+        set_button_fg(self.fold, "chev_up" if folded else "chev", T.FAINT, 14)
+        self.fold.setToolTip("Rozwiń kolejkę" if folded else "Zwiń kolejkę")
+        self.resized.emit()

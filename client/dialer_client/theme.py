@@ -134,6 +134,23 @@ SVG = {
     "alert": f'<svg {_S} stroke-width="2.2"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 '
              '0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>',
     "retry": f'<svg {_S} stroke-width="2.2"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>',
+    # call queue (kolejka)
+    "q_client": f'<svg {_S} stroke-width="2"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 21v-4h6v4"/>'
+                '<path d="M8 7h2M14 7h2M8 11h2M14 11h2"/></svg>',
+    "q_lead": f'<svg {_S} stroke-width="2"><path d="M3 4h18l-7 8v6l-4 2v-8z"/></svg>',
+    "q_maps": f'<svg {_S} stroke-width="2"><path d="M12 22s7-6.2 7-12a7 7 0 0 0-14 0c0 5.8 7 12 7 12z"/>'
+              '<circle cx="12" cy="10" r="2.5"/></svg>',
+    "q_hist": f'<svg {_S} stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v4h4"/><path d="M12 8v4l3 2"/></svg>',
+    "q_new": f'<svg {_S} stroke-width="2"><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6"/>'
+             '<path d="M12 17h.01"/><circle cx="12" cy="12" r="9"/></svg>',
+    "phone": f'<svg {_S} stroke-width="2.2"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 '
+             '1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8 9.8a16 '
+             '16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.5c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.7 2z"/></svg>',
+    "mail": f'<svg {_S} stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>',
+    "skip": f'<svg {_S} stroke-width="2.2"><path d="M5 4l10 8-10 8z"/><path d="M19 5v14"/></svg>',
+    "back": f'<svg {_S} stroke-width="2.2"><path d="M17 3l4 4-4 4"/><path d="M21 7H9a5 5 0 0 0 0 10h3"/></svg>',
+    "chev": f'<svg {_S} stroke-width="2.2"><path d="m6 9 6 6 6-6"/></svg>',
+    "chev_up": f'<svg {_S} stroke-width="2.2"><path d="m6 15 6-6 6 6"/></svg>',
     "logo": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="1 1 48 48"><path fill-rule="evenodd" fill="currentColor" '
             'd="M12 4H28a8 8 0 0 1 8 8V36H12a8 8 0 0 1-8-8V12a8 8 0 0 1 8-8Z M11 14h18v6H11Z"/>'
             '<rect x="38" y="38" width="9" height="9" rx="2" fill="currentColor"/></svg>',
