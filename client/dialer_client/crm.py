@@ -756,3 +756,20 @@ def dial_uri(phone: str) -> str:
     elif not raw.startswith("+") and not (len(digits) == 11 and digits.startswith("48")):
         return f"tel:{digits}"  # short or unusual: pass it on as it is
     return f"tel:+{digits}"
+
+
+def test_entries(spec: str) -> list[dict]:
+    """Local test cards for the queue from config.toml, e.g. queue_test = "Gleb +48571333328".
+
+    Several are separated by commas or semicolons. They exist only in this app, never in the CRM.
+    """
+    out = []
+    for part in re.split(r"[,;]", spec or ""):
+        m = re.match(r"^\s*(.*?)\s*(\+?[\d\s()-]{9,})\s*$", part)
+        if not m:
+            continue
+        name, phone = m.group(1) or "Test", re.sub(r"[^\d+]", "", m.group(2))
+        out.append({"key": f"test:{normalize_phone(phone)}", "reason": "test", "type": "test", "at": "",
+                    "all_day": False, "count": 0, "phone": phone, "email": "", "title": name,
+                    "person": "", "calls": [], "prior_calls": 0})
+    return out

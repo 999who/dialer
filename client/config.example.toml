@@ -41,3 +41,4 @@ offline_buffer_s = 60
 # crm_key = ""
 crm_sip = ""                  # Zadarma extension of this PC, e.g. "100"; empty = any
 own_numbers = "609037902, 525275052"   # company numbers: no client card
+# queue_test = "Gleb +48571333328"     # test cards on top of the queue (this PC only, not in the CRM)

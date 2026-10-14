@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import QApplication, QDialog, QMenu, QMessageBox, QSystemTr
 
 from . import theme as T
 from .config import CONFIG_PATH, Config, load_config, needs_setup, save_values
-from .crm import Crm, CrmError, Supabase
+from .crm import Crm, CrmError, Supabase, normalize_phone, test_entries
 from .login_dialog import LoginDialog
 from .settings_dialog import SettingsDialog
 from .detect import CallDetector, ZadarmaWatcher
@@ -228,10 +228,13 @@ class DialerApp(QObject):
     def _show_queue(self) -> None:
         if not self.crm or self.detector.in_call or self.overlay.has_client():
             return
-        skipped = [k for k in self.queue_skipped if any(i["key"] == k for i in self.queue_items)]
+        tests = test_entries(self.cfg.queue_test)
+        test_numbers = {normalize_phone(t["phone"]) for t in tests}
+        entries = tests + [i for i in self.queue_items if normalize_phone(i["phone"]) not in test_numbers]
+        skipped = [k for k in self.queue_skipped if any(i["key"] == k for i in entries)]
         self.queue_skipped = skipped
-        items = [i for i in self.queue_items if i["key"] not in skipped]
-        items += sorted((i for i in self.queue_items if i["key"] in skipped), key=lambda i: skipped.index(i["key"]))
+        items = [i for i in entries if i["key"] not in skipped]
+        items += sorted((i for i in entries if i["key"] in skipped), key=lambda i: skipped.index(i["key"]))
         self.overlay.show_queue(items)
 
     def _skip_queue_entry(self, key: str) -> None:
